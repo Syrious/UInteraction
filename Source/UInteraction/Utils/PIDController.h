@@ -23,8 +23,14 @@ public:
 	// Update the PID loop
 	float Update(const float Error, const float DeltaTime);
 
-	// Update the only PD loop
-	float UpdatePD(const float Error, const float DeltaTime);
+	// Update only P
+	float UpdateAsP(const float Error, const float DeltaTime);
+
+	// Update only PD
+	float UpdateAsPD(const float Error, const float DeltaTime);
+
+	// Update only PÍ
+	float UpdateAsPI(const float Error, const float DeltaTime);
 
 	// Reset error values of the PID
 	void Reset();

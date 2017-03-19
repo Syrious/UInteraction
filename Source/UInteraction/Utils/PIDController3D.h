@@ -23,8 +23,14 @@ public:
 	// Update the PID loop
 	FVector Update(const FVector Error, const float DeltaTime);
 
-	// Update the only PD loop
-	FVector UpdatePD(const FVector Error, const float DeltaTime);
+	// Update only P
+	FVector UpdateAsP(const FVector Error, const float DeltaTime);
+
+	// Update only PD
+	FVector UpdateAsPD(const FVector Error, const float DeltaTime);
+
+	// Update only PÍ
+	FVector UpdateAsPI(const FVector Error, const float DeltaTime);
 
 	// Reset error values of the PID
 	void Reset();

@@ -69,8 +69,30 @@ float PIDController::Update(const float Error, const float DeltaTime)
 	return Out;
 };
 
-// Update the PID loop
-float PIDController::UpdatePD(const float Error, const float DeltaTime)
+// Update only P
+float PIDController::UpdateAsP(const float Error, const float DeltaTime)
+{
+	if (DeltaTime == 0.0f || FMath::IsNaN(Error))
+	{
+		return 0.0f;
+	}
+
+	// Calculate proportional output
+	const float Out = P * Error;
+
+	// Clamp output to max/min values
+	if (OutMax > 0.f || OutMin < 0.f)
+	{
+		if (Out > OutMax)
+			return OutMax;
+		else if (Out < OutMin)
+			return OutMin;
+	}
+	return Out;
+};
+
+// Update only PD
+float PIDController::UpdateAsPD(const float Error, const float DeltaTime)
 {
 	if (DeltaTime == 0.0f || FMath::IsNaN(Error))
 	{
@@ -99,6 +121,35 @@ float PIDController::UpdatePD(const float Error, const float DeltaTime)
 			return OutMin;
 	}
 
+	return Out;
+};
+
+// Update only PI
+float PIDController::UpdateAsPI(const float Error, const float DeltaTime)
+{
+	if (DeltaTime == 0.0f || FMath::IsNaN(Error))
+	{
+		return 0.0f;
+	}
+
+	// Calculate proportional output
+	const float POut = P * Error;
+
+	// Calculate integral error / output
+	IErr += DeltaTime * Error;
+	const float IOut = I * IErr;
+	
+	// Calculate the output
+	const float Out = POut + IOut;
+
+	// Clamp output to max/min values
+	if (OutMax > 0.f || OutMin < 0.f)
+	{
+		if (Out > OutMax)
+			return OutMax;
+		else if (Out < OutMin)
+			return OutMin;
+	}
 	return Out;
 };
 
