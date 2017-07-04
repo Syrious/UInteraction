@@ -12,7 +12,7 @@
   - CMovement 
   - COpenClose
   - CRotateButton
-  - ...
+  - CPickup etc. Look what you need
 - Copy the 'Highlights'-folder into your content folder
 - Select 'PostProcessVolume' in the world outliner, go to 'Rendering Features' and add the 'PP_Outliner_M.uasset' to 'Post Process Materials'
 - For picking up items you have to specify empty 3 actors (should be attached to the character) as the hand positions
