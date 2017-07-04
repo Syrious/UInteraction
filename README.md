@@ -1,3 +1,9 @@
+# Note: UTags is not implemented and used yet. Use the following tags:
+- "Interactable" to highlight interactable objects
+- "OpenCloseable" to add open and close functionality
+- "RotateButton" to interact with rotating buttons
+- "Pickup" to pickup and drop items
+
 # Installation
 - Add the PLUGIN to your project
 - Place a 'Character Controller' to the scene
@@ -9,6 +15,7 @@
   - ...
 - Copy the 'Highlights'-folder into your content folder
 - Select 'PostProcessVolume' in the world outliner, go to 'Rendering Features' and add the 'PP_Outliner_M.uasset' to 'Post Process Materials'
+- For picking up items you have to specify empty 3 actors (should be attached to the character) as the hand positions
 
 # Controls
 
