@@ -17,6 +17,12 @@
 - Select 'PostProcessVolume' in the world outliner, go to 'Rendering Features' and add the 'PP_Outliner_M.uasset' to 'Post Process Materials'
 - For picking up items you have to specify empty 3 actors (should be attached to the character) as the hand positions
 
+# Stability Checker Scene Capture
+- To use a visual response while the stability check is running, add a ```Scene Capture 2D```Actor to the scene
+- Bring the Scene Capture Camera into position (Orthographic is recommended)
+- Set 'Texture Target' of the Scene Caprute 2D to RenderTargetTexture which is provided in ClickInteractions/Textures
+- Also use the CIHUD resp. BP_CIHUD as HUD
+
 # Controls
 
  - `Mouse` Look around
