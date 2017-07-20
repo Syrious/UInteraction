@@ -35,6 +35,7 @@ protected:
 
 private:
 	AStaticMeshActor* ClickedActor;
+	TSet <AActor*> SetOfRotateableItems;
 
 	void AddRadialForceToObject(float DeltaTime);
 };

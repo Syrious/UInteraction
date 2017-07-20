@@ -1,4 +1,4 @@
-#define TAG_ROTATEBUTTON "RotateButton"
+#define TAG_KEY_ROTATEBUTTON "RotateButton"
 
 // Fill out your copyright notice in the Description page of Project Settings.
 #include "CRotateButton.h"
@@ -6,6 +6,7 @@
 #include "../Private/Character/CharacterController.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
+#include "TagStatics.h"
 #include "GameFramework/PlayerController.h"
 
 
@@ -28,7 +29,7 @@ void UCRotateButton::BeginPlay()
 	Super::BeginPlay();
 
 	// ...
-
+	SetOfRotateableItems = FTagStatics::GetActorSetWithKeyValuePair(GetWorld(), "ClickInteraction", TAG_KEY_ROTATEBUTTON, "True");
 }
 
 
@@ -43,7 +44,7 @@ void UCRotateButton::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 	bool bLeftMouseClicked = GetWorld()->GetFirstPlayerController()->WasInputKeyJustPressed(EKeys::LeftMouseButton);
 	bool bLeftMouseReleased = GetWorld()->GetFirstPlayerController()->WasInputKeyJustReleased(EKeys::LeftMouseButton);
 
-	if (PlayerCharacter->FocusedActor != nullptr && PlayerCharacter->FocusedActor->Tags.Contains(TAG_ROTATEBUTTON) && bLeftMouseClicked)
+	if (PlayerCharacter->FocusedActor != nullptr && SetOfRotateableItems.Contains(PlayerCharacter->FocusedActor) && bLeftMouseClicked)
 	{
 		ClickedActor = PlayerCharacter->FocusedActor;
 		PlayerCharacter->MovementComponent->SetMovable(false);

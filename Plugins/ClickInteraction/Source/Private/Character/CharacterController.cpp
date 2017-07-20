@@ -1,4 +1,4 @@
-#define TAG_INTERACTABLE "Interactable"
+#define TAG_KEY_INTERACTABLE "Interactable"
 
 #define print(text) if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 100000.0f,FColor::White,text, false);
 #define printAndStop(text) if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 100000.0f,FColor::Red,text, false); GetWorld()->GetFirstPlayerController()->SetPause(true);
@@ -7,6 +7,7 @@
 
 #include "CharacterController.h"
 #include "DrawDebugHelpers.h"
+#include "TagStatics.h"
 #include "Engine.h" // Needed for GEngine
 
 // #include "Runtime/Engine/Public/EngineGlobals.h"
@@ -22,6 +23,7 @@ ACharacterController::ACharacterController()
 	// Set this character to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
 	PrimaryActorTick.bCanEverTick = true;
 	RaycastRange = 150.0f;
+	bRaytraceEnabled = true;
 
 	GetCapsuleComponent()->SetCapsuleRadius(1);
 }
@@ -36,14 +38,17 @@ void ACharacterController::BeginPlay()
 	if (Character == nullptr)
 	{
 		printAndStop("ACharacterController::BeginPlay: Character is null. Game paused to prevent crash.");
+		Character->PlayerState->bIsSpectator = true;
 	}
+
+	SetOfInteractableItems = FTagStatics::GetActorSetWithKeyValuePair(GetWorld(), "ClickInteraction", TAG_KEY_INTERACTABLE, "True");
 }
 
 // Called every frame
 void ACharacterController::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	
+
 	// Check if the player can move or should be movable again
 	if (GetWorld()->GetFirstPlayerController()->WasInputKeyJustReleased(EKeys::LeftMouseButton))
 	{
@@ -133,6 +138,7 @@ void ACharacterController::SetupComponents()
 
 void ACharacterController::StartRaytrace()
 {
+	if (bRaytraceEnabled == false) return;
 	FVector CamLoc;
 	FRotator CamRot;
 
@@ -142,7 +148,7 @@ void ACharacterController::StartRaytrace()
 	const FVector EndTrace = StartTrace + Direction * RaycastRange; // and trace end is the camera location + an offset in the direction
 
 	FCollisionQueryParams TraceParams;
-
+	
 	TraceParams.AddIgnoredActor(this); // We don't want to hit ourself
 
 	GetWorld()->LineTraceSingleByChannel(RaycastResult, StartTrace, EndTrace, ECollisionChannel::ECC_Visibility, TraceParams);
@@ -164,7 +170,7 @@ void ACharacterController::CheckIntractability()
 			// UE_LOG(LogTemp, Warning, TEXT("Hit actor %s"), *Actor->GetName());
 		}
 
-		if (Actor->Tags.Contains(TAG_INTERACTABLE))
+		if (SetOfInteractableItems.Contains(Actor))
 		{
 			// Deactivate outline of previous object
 			if (FocusedActor != nullptr && FocusedActor != Actor)
@@ -178,7 +184,7 @@ void ACharacterController::CheckIntractability()
 		else if (FocusedActor != nullptr && bComponentsLocked == false)
 		{
 			FocusedActor->GetStaticMeshComponent()->SetRenderCustomDepth(false);
-			FocusedActor = nullptr;			
+			FocusedActor = nullptr;
 		}
 	}
 	else

@@ -38,6 +38,8 @@ public:
 	UPROPERTY(EditAnywhere)
 		AActor* BothHandPosition;
 
+	bool bRaytraceEnabled;
+
 protected:
 	// Called when the game starts or when spawned
 	virtual void BeginPlay() override;
@@ -52,6 +54,8 @@ public:
 
 	AStaticMeshActor* FocusedActor;
 
+	UActorComponent* LockedByComponent; // If this isn't nuullptr this component has exclusive rights
+
 	// Called every frame
 	virtual void Tick(float DeltaTime) override;
 
@@ -65,6 +69,8 @@ private:
 	FHitResult RaycastResult; // The result of the constant raycasting
 	FVector PreviousPosition;
 	FRotator PreviousRotation;
+
+	TSet<AActor*> SetOfInteractableItems;
 
 	bool bIsMovementLocked; // Whether or not the player can move
 

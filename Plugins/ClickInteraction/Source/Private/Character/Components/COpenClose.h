@@ -35,6 +35,10 @@ protected:
 	virtual void BeginPlay() override;
 
 private:
+	bool bLastUsedHandWasRightHand;
+	TSet<AActor*> SetOfOPenCloasableItems;
+
+	void SetLockedByComponent(bool bIsLocked);
 
 	AStaticMeshActor* ClickedActor;
 	void AddForceToObject(float DeltaTime);

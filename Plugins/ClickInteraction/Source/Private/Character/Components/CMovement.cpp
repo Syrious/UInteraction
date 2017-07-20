@@ -2,6 +2,7 @@
 #include "CMovement.h"
 
 #include "../Private/Character/CharacterController.h"
+#include "Runtime/Engine/Classes/GameFramework/Controller.h"
 #include "Runtime/Engine/Classes/GameFramework/Character.h"
 #include "Runtime/Engine/Classes/GameFramework/CharacterMovementComponent.h"
 

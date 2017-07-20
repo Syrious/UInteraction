@@ -1,10 +1,12 @@
-#define TAG_OPENCLOSABLE "OpenCloseable"
+#define TAG_KEY_OPENCLOSABLE "OpenCloseable"
+
 
 // Fill out your copyright notice in the Description page of Project Settings.
 #include "COpenClose.h"
 
 #include "../Private/Character/CharacterController.h"
 #include "Components/StaticMeshComponent.h"
+#include "TagStatics.h"
 #include "Kismet/GameplayStatics.h"
 #include "DrawDebugHelpers.h"
 
@@ -30,6 +32,8 @@ void UCOpenClose::BeginPlay()
 	Super::BeginPlay();
 	// ...
 
+	SetOfOPenCloasableItems = FTagStatics::GetActorSetWithKeyValuePair(GetWorld(), "ClickInteraction", TAG_KEY_OPENCLOSABLE, "True");
+
 }
 
 
@@ -39,26 +43,61 @@ void UCOpenClose::TickComponent(float DeltaTime, ELevelTick TickType, FActorComp
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 	if (PlayerCharacter == nullptr) return;
 
+	if (PlayerCharacter->LockedByComponent != nullptr &&  PlayerCharacter->LockedByComponent != this) return; // Another component has exclusive rights for the controlls
+
+	bool bRightHandEmpty = true;
+	bool bLeftHandEmpty = true;
+
+	// Check if hands are empty
+	if (PlayerCharacter->PickupComponent != nullptr) {
+		bRightHandEmpty = PlayerCharacter->PickupComponent->ItemInRightHand == nullptr;
+		bLeftHandEmpty = PlayerCharacter->PickupComponent->ItemInLeftHand == nullptr;
+	}
+
 	bool bLeftMouseHold = GetWorld()->GetFirstPlayerController()->IsInputKeyDown(EKeys::LeftMouseButton);
 	bool bLeftMouseClicked = GetWorld()->GetFirstPlayerController()->WasInputKeyJustPressed(EKeys::LeftMouseButton);
 	bool bLeftMouseReleased = GetWorld()->GetFirstPlayerController()->WasInputKeyJustReleased(EKeys::LeftMouseButton);
 
-	if (PlayerCharacter->FocusedActor != nullptr && PlayerCharacter->FocusedActor->Tags.Contains(TAG_OPENCLOSABLE) && bLeftMouseClicked)
+	bool bRightMouseHold = GetWorld()->GetFirstPlayerController()->IsInputKeyDown(EKeys::RightMouseButton);
+	bool bRightMouseClicked = GetWorld()->GetFirstPlayerController()->WasInputKeyJustPressed(EKeys::RightMouseButton);
+	bool bRightMouseReleased = GetWorld()->GetFirstPlayerController()->WasInputKeyJustReleased(EKeys::RightMouseButton);
+
+	if (PlayerCharacter->FocusedActor != nullptr && SetOfOPenCloasableItems.Contains(PlayerCharacter->FocusedActor))
 	{
-		ClickedActor = PlayerCharacter->FocusedActor;
-		PlayerCharacter->MovementComponent->SetMovable(false);
+		if (bRightMouseClicked && bRightHandEmpty || bLeftMouseClicked && bLeftHandEmpty) {
+			bLastUsedHandWasRightHand = bRightMouseClicked;
+
+			ClickedActor = PlayerCharacter->FocusedActor;
+			PlayerCharacter->MovementComponent->SetMovable(false);
+			SetLockedByComponent(true);
+		}
 	}
 
-	if (bLeftMouseHold && ClickedActor != nullptr)
+	if (ClickedActor != nullptr)
 	{
-		AddForceToObject(DeltaTime);
-		ClickedActor->GetStaticMeshComponent()->SetRenderCustomDepth(true); // Keep object highlighted
+		if (bLastUsedHandWasRightHand && bRightMouseHold || bLastUsedHandWasRightHand == false && bLeftMouseHold) {
+			AddForceToObject(DeltaTime);
+			ClickedActor->GetStaticMeshComponent()->SetRenderCustomDepth(true); // Keep object highlighted
+		}
+
+		if (bLeftMouseReleased || bRightMouseReleased)
+		{
+			ClickedActor->GetStaticMeshComponent()->SetRenderCustomDepth(false);
+			PlayerCharacter->MovementComponent->SetMovable(true);
+			ClickedActor = nullptr;
+
+			SetLockedByComponent(false);
+		}
 	}
-	else if (bLeftMouseReleased && ClickedActor != nullptr)
-	{
-		ClickedActor->GetStaticMeshComponent()->SetRenderCustomDepth(false);
-		PlayerCharacter->MovementComponent->SetMovable(true);
-		ClickedActor = nullptr;
+}
+
+void UCOpenClose::SetLockedByComponent(bool bIsLocked)
+{
+	if (bIsLocked) {
+		PlayerCharacter->LockedByComponent = this;
+	}
+	else {
+		PlayerCharacter->LockedByComponent = nullptr;
 	}
 }
 

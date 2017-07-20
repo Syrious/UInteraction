@@ -3,10 +3,14 @@
 #pragma once
 
 #include "Components/ActorComponent.h"
+#include "../Components/CPickup.h"
 #include "Engine/StaticMeshActor.h"
+#include "Components/StaticMeshComponent.h"
 #include "GameFramework/Actor.h"
 #include "CoreMinimal.h"
 #include "PickupAnimation.generated.h"
+
+
 
 USTRUCT()
 struct FPickupAnimation
@@ -20,14 +24,17 @@ private:
 	FVector EndPosition;
 	float AnimationTime;
 	float currentTime;
+	bool bSweep;
+	bool isDone;
 
 	UStaticMeshComponent* Mesh;
 
 public:
 	bool bDropItem;
-
+	EHand HandPosition;
 	FPickupAnimation() {}
 
+	// _bDropItem = Are we droping or picking up?
 	FPickupAnimation(AStaticMeshActor* ActorToMove, AActor* HandActor, float TimeOfAnimation, bool _bDropItem = false) {
 		ObjectToMove = ActorToMove;
 		StartPosition = ActorToMove->GetActorLocation();
@@ -41,12 +48,13 @@ public:
 		Mesh->SetEnableGravity(false);
 	}
 
-	FPickupAnimation(AStaticMeshActor* ActorToMove, FVector PositionToMove, float TimeOfAnimation, bool _bDropItem = false) {
+	FPickupAnimation(AStaticMeshActor* ActorToMove, FVector PositionToMove, EHand FinalHandPosition, float TimeOfAnimation, bool _bDropItem = false) {
 		ObjectToMove = ActorToMove;
 		StartPosition = ActorToMove->GetActorLocation();
 		EndPosition = PositionToMove;
 		AnimationTime = TimeOfAnimation;
 		bDropItem = _bDropItem;
+		HandPosition = FinalHandPosition;
 		currentTime = 0;
 
 		Mesh = ObjectToMove->GetStaticMeshComponent();
@@ -65,7 +73,11 @@ public:
 
 		if (PercentDone >= 1)
 		{
-			Mesh->SetEnableGravity(bDropItem); // Enable gravity if we droped the item
+			Mesh->SetEnableGravity(true); // Enable gravity if we droped the item
+			// Stop velocity
+			Mesh->SetPhysicsAngularVelocity(FVector::ZeroVector);
+			Mesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
+			ObjectToMove->GetRootComponent()->ComponentVelocity = FVector::ZeroVector;
 			return true;
 		}
 		else
