@@ -26,8 +26,8 @@ public:
 	UPROPERTY(EditAnywhere)
 		float ForceToApply;
 
-	UPROPERTY(EditAnyWhere)
-		bool bLocksComponent;
+	//UPROPERTY(EditAnyWhere)
+	//	bool bLocksComponent;
 
 protected:
 	// Called when the game starts

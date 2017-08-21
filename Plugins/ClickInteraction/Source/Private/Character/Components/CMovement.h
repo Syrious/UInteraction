@@ -6,11 +6,12 @@
 #include "Components/ActorComponent.h"
 #include "Runtime/Engine/Classes/GameFramework/Character.h"
 #include "CoreMinimal.h"
+#include "GameFramework/Character.h"
 #include "CMovement.generated.h"
 
-class ACharacterController; // Use Forward Declaration. Including the header in COpenClose.cpp
+//class ACharacterController; // Use Forward Declaration. Including the header in CMovement.cpp
 
-UCLASS( ClassGroup=(Custom), meta=(BlueprintSpawnableComponent) )
+UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class CLICKINTERACTION_API UCMovement : public UActorComponent
 {
 	GENERATED_BODY()
@@ -32,17 +33,49 @@ public:
 
 	void AddControllerYawInput(const float Val);
 
+
+	// The maximum (or default) speed
+	UPROPERTY(EditAnywhere, Category = "CI - Speed Setup")
+		float MaxMovementSpeed;
+
+	// The minimum movement speed. Used if player picks up items which then effects speed
+	UPROPERTY(EditAnywhere, Category = "CI - Speed Setup")
+		float MinMovementSpeed;
+
+	float CurrentSpeed;
+
 protected:
 
 
 public:
 	// Called every frame
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+	void SetupKeyBindings(UInputComponent* PlayerInputComponent);
 
 	void SetMovable(bool bCanMove);
 
+	// Toggle crouch
+	void ToggleCrouch();
+
 private:
 	ACharacter* Character;
+
+	// Stores the default speed set at start game
+	float DefaultSpeed;
+
 	bool bCanMove;
+
+	// *** Crouching ***
+	float DefaultHeight;
+	bool bIsCrouching;
+	// Smooth crouch timer handle
+	FTimerHandle CrouchTimer;
+
+	// Smooth crouch
+	void SmoothCrouch();
+
+	// Smooth stand up
+	void SmoothStandUp();
+	// *** *** *** *** *** *** 
 
 };

@@ -18,7 +18,7 @@ UCRotateButton::UCRotateButton()
 	PrimaryComponentTick.bCanEverTick = true;
 
 	ForceToApply = 50.0f;
-	bLocksComponent = true;
+	//bLocksComponent = true;
 	// ...
 }
 

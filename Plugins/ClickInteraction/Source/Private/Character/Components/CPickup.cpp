@@ -1,11 +1,8 @@
+#define PLUGIN_TAG "ClickInteraction"
 #define TAG_KEY_PICKUP "Pickup"
-#define PICKUP_ANIMATION_TIME 0.2f
-#define LIN_DAMPING 20.0f
-#define ANGULAR_DAMPING 20.0f
-#define RAYCAST_RANGE 200.0f
-#define PICKUP_SHADOW_SCALE_FACTOR 0.2f // The scale factor when testing collisions on pickup
-
-// Copyright 2017, Institute for Artificial Intelligence - University of Bremen
+#define SEMLOG_TAG "SemLog"
+#define STACKCHECK_RANGE 500.0f
+#define PICKUP_SHADOW_SCALE_FACTOR 0.4f // The scale factor when testing collisions on pickup
 
 #include "CPickup.h"
 #include "Components/StaticMeshComponent.h"
@@ -13,6 +10,8 @@
 #include "GameFramework/PlayerController.h"
 #include "../Private/Character/CharacterController.h"
 #include "TagStatics.h"
+#include "SLContactManager.h"
+#include "SLUtils.h"
 #include "Engine.h"
 
 // Sets default values for this component's properties
@@ -22,18 +21,25 @@ UCPickup::UCPickup()
 	// off to improve performance if you don't need them.
 	PrimaryComponentTick.bCanEverTick = true;
 
-	bLocksComponent = false;
-	bDoStackCheck = true;
+	// *** *** *** Default values *** *** ***
+	bPerformStabilityCheckForStacks = true;
 
-	bUseBothHands = true;
+	MaximumMassToCarry = 10.0f;
+	bMassEffectsMovementSpeed = true;
+	bUseQuadratricEquationForSpeedCalculation = true;
+
+	bTwoHandMode = true;
+	bStackModeEnabled = true;
+	bNeedBothHands = true;
 	bBothHandsDependOnMass = true;
-	MassThresholdTouseBothHands = 5.0f;
+	MassThresholdBothHands = 1.5f;
 
-	bBothHandsDependOnVolume = true;
-	VolumeThresholdTouseBothHands = 3000.0f;
+	bBothHandsDependOnVolume = false;
+	VolumeThresholdBothHands = 3000.0f;
 
-	bCheckForCollisionsOnPickup = true;
-	// ...
+	bCheckForCollisionsOnPickup = false;
+	bCheckForCollisionsOnDrop = true;
+	// *** *** *** *** *** *** *** ***
 }
 
 
@@ -42,21 +48,23 @@ void UCPickup::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// ...
 
-	SetOfPickupItems = FTagStatics::GetActorSetWithKeyValuePair(GetWorld(), "ClickInteraction", TAG_KEY_PICKUP, "True");
+	SetOfPickupItems = FTagStatics::GetActorSetWithKeyValuePair(GetWorld(), PLUGIN_TAG, TAG_KEY_PICKUP, "True");
 
-	//UInputComponent* PlayerInputComponent = 
-
-	//PlayerInputComponent->BindAction("Fire", IE_Pressed, this, &UCPlaceItem::OnFirePressed);
 	if (PlayerCharacter != nullptr) {
+		RaycastRange = PlayerCharacter->GraspRange;
+
 		UInputComponent* PlayerInputComponent = PlayerCharacter->InputComponent;
 
 		PlayerInputComponent->BindAction("CancelAction", IE_Pressed, this, &UCPickup::CancelActions);
 		PlayerInputComponent->BindAction("CancelAction", IE_Released, this, &UCPickup::StopCancelActions);
-		PlayerInputComponent->BindAction("ResetRotation", IE_Pressed, this, &UCPickup::ResetRotationOfItemsInHand);
 
 		// Create Static mesh actors for hands to weld items we pickup into this position
+		if (PlayerCharacter->LeftHandPosition == nullptr || PlayerCharacter->RightHandPosition == nullptr || PlayerCharacter->BothHandPosition == nullptr) {
+			GEngine->AddOnScreenDebugMessage(-1, 100000.0f, FColor::Red, "No hand actors found. Game paused", false);
+			GetWorld()->GetFirstPlayerController()->SetPause(true);
+		}
+
 		LeftHandActor = GetWorld()->SpawnActor<AStaticMeshActor>();
 		RightHandActor = GetWorld()->SpawnActor<AStaticMeshActor>();
 		BothHandActor = GetWorld()->SpawnActor<AStaticMeshActor>();
@@ -73,9 +81,13 @@ void UCPickup::BeginPlay()
 		RightHandActor->AttachToActor(PlayerCharacter, FAttachmentTransformRules::KeepWorldTransform);
 		BothHandActor->AttachToActor(PlayerCharacter, FAttachmentTransformRules::KeepWorldTransform);
 
-		LeftHandActor->GetStaticMeshComponent()->SetSimulatePhysics(true);
-		RightHandActor->GetStaticMeshComponent()->SetSimulatePhysics(true);
-		BothHandActor->GetStaticMeshComponent()->SetSimulatePhysics(true);
+		LeftHandActor->GetStaticMeshComponent()->SetSimulatePhysics(false);
+		RightHandActor->GetStaticMeshComponent()->SetSimulatePhysics(false);
+		BothHandActor->GetStaticMeshComponent()->SetSimulatePhysics(false);
+
+		LeftHandActor->GetStaticMeshComponent()->SetCollisionProfileName("NoCollision");
+		RightHandActor->GetStaticMeshComponent()->SetCollisionProfileName("NoCollision");
+		BothHandActor->GetStaticMeshComponent()->SetCollisionProfileName("NoCollision");
 	}
 
 	// Bind Delegate to StackChecker
@@ -86,6 +98,13 @@ void UCPickup::BeginPlay()
 	else
 	{
 		UE_LOG(LogTemp, Warning, TEXT("No Stack checker assigned"));
+	}
+
+	// Get the semantic log runtime manager from the world
+	for (TActorIterator<ASLRuntimeManager>RMItr(GetWorld()); RMItr; ++RMItr)
+	{
+		SemLogRuntimeManager = *RMItr;
+		break;
 	}
 }
 
@@ -100,123 +119,76 @@ void UCPickup::TickComponent(float DeltaTime, ELevelTick TickType, FActorCompone
 
 	bool bLockedByOtherComponent = PlayerCharacter->LockedByComponent != nullptr &&  PlayerCharacter->LockedByComponent != this;
 
-	bool bLeftMouseHold = GetWorld()->GetFirstPlayerController()->IsInputKeyDown(EKeys::LeftMouseButton);
-	bool bLeftMouseClicked = GetWorld()->GetFirstPlayerController()->WasInputKeyJustPressed(EKeys::LeftMouseButton);
-	bool bLeftMouseReleased = GetWorld()->GetFirstPlayerController()->WasInputKeyJustReleased(EKeys::LeftMouseButton);
+	if (bForceDropKeyDown) GEngine->AddOnScreenDebugMessage(1, 0.1f, FColor::Green, FString("Force Drop Enabled"), true);
+	if (bDraggingKeyDown || bIsDragging) GEngine->AddOnScreenDebugMessage(2, 0.1f, FColor::Green, FString("Drag Mode"), true);
 
-	bool bRightMouseHold = GetWorld()->GetFirstPlayerController()->IsInputKeyDown(EKeys::RightMouseButton);
-	bool bRightMouseClicked = GetWorld()->GetFirstPlayerController()->WasInputKeyJustPressed(EKeys::RightMouseButton);
-	bool bRightMouseReleased = GetWorld()->GetFirstPlayerController()->WasInputKeyJustReleased(EKeys::RightMouseButton);
-
-	bool bForceDrop = GetWorld()->GetFirstPlayerController()->IsInputKeyDown(EKeys::LeftControl); // Enable ForceDrop
-	bool bDragging = GetWorld()->GetFirstPlayerController()->IsInputKeyDown(EKeys::LeftShift); // Enable Draggin
-
-	if (bForceDrop) GEngine->AddOnScreenDebugMessage(1, 0.1f, FColor::Green, FString("Force Drop Enabled"), true);
-
-	if (bLockedByOtherComponent == false) {
-
-		if ((bLeftMouseHold || bRightMouseHold) && bIsDragging)
-		{
-			DragItem(bRightMouseHold);
-		}
-
+	if (bLockedByOtherComponent == false && bAllCanceled == false) {
 		ItemToHandle = PlayerCharacter->FocusedActor;
 
-		if (ItemToHandle != nullptr)
-		{
-			if (SetOfPickupItems.Contains(ItemToHandle) && bForceDrop == false)
-			{
-				if (bRightMouseClicked || bLeftMouseClicked)
-				{
-					if (bDragging)
-					{
-						StartDrag(bRightMouseClicked);
-					}
-					else {
-						if (bRightMouseClicked) {
-							if (ItemInRightHand == nullptr) {
-								UsedHand = EHand::Right;
-								StartPickup();
-							}
-							else {
-								ShadowDropItem(bRightMouseClicked);
-							}
-						}
-						else {
-							if (ItemInLeftHand == nullptr) {
-								UsedHand = EHand::Left;
-								StartPickup();
-							}
-							else {
-								ShadowDropItem(bRightMouseClicked);
-							}
-						}
-					}
-				}
-
-				if (bRightMouseHold || bLeftMouseHold)
-				{
-					if (bIsDragging == false && bAllCanceled == false)	ShadowPickupItem(bRightMouseHold);
-				}
-
-				if (bRightMouseReleased || bLeftMouseReleased)
-				{
-					if (bIsDragging == false && bAllCanceled == false) {
-						if (bDoStackCheck) {
-							StartStackCheck();
-						}
-						else {
-							bRightHandPickup = bRightMouseReleased;
-							PickupItem(bRightMouseReleased);
-						}
-					}
-				}
-			}
+		if (bRightMouseHold) {
+			OnInteractionKeyHold(true);
+		}
+		else if (bLeftMouseHold) {
+			OnInteractionKeyHold(false);
 		}
 	}
-
-	if (ItemToHandle == nullptr || ItemToHandle != nullptr && bForceDrop) // Drop only if we haven't focused on an interacable or force drop mode is enabled
-	{
-		if (bRightMouseHold || bLeftMouseHold)
-		{
-			if (bIsDragging == false && bAllCanceled == false) ShadowDropItem(bRightMouseHold);
-		}
-
-		if (bRightMouseReleased || bLeftMouseReleased) {
-			// We clicked onto something else
-			if (bIsDragging == false && bAllCanceled == false) DropItem(bRightMouseReleased);
-		}
-	}
-
-
-	if (bLeftMouseReleased || bRightMouseReleased || bAllCanceled)
-	{
-		EndDrag();
-		DisableShadowItems();
-		SetLockedByComponent(false);
-		CancelDetachItems();
-	}
-
-	AnimatePickup(DeltaTime);
-	// MoveItemsRelativeToHands(DeltaTime);
 }
 
 void UCPickup::StartPickup()
 {
+	if (bTwoHandMode == false && (ItemInRightHand != nullptr || ItemInLeftHand != nullptr)) return; // We only have one hand but already holding something
+	SetLockedByComponent(true);
+
 	PlayerCharacter->bRaytraceEnabled = false;
-	BaseItemToPick = GetItemStack(ItemToHandle);
+	if (bForceSinglePickupKeyDown || bStackModeEnabled == false) {
+		BaseItemToPick = ItemToHandle;
+	}
+	else {
+		BaseItemToPick = GetItemStack(ItemToHandle);
+	}
 
-	if (bUseBothHands && CalculateIfBothHandsNeeded()) UsedHand = EHand::Both;
+	UStaticMeshComponent* MeshComponent = BaseItemToPick->GetStaticMeshComponent();
+	MeshComponent->SetSimulatePhysics(true);
 
-	BaseItemToPick->GetStaticMeshComponent()->SetSimulatePhysics(false);
+	MassOfLastItemPickedUp = MeshComponent->GetMass();
 
+	if (MassOfLastItemPickedUp + MassToCarry > MaximumMassToCarry) {
+		GEngine->AddOnScreenDebugMessage(1, 3.0f, FColor::Red, "Object too heavy.", false);
+
+		UnstackItems(BaseItemToPick);
+
+		BaseItemToPick = nullptr;
+		PlayerCharacter->bRaytraceEnabled = true;
+		return;
+	}
+
+	if (bMassEffectsMovementSpeed) SetMovementSpeed(MassOfLastItemPickedUp);
+
+	if (bNeedBothHands && CalculateIfBothHandsNeeded()) {
+		// Both hands needed
+		if (bTwoHandMode && ItemInRightHand == nullptr && ItemInLeftHand == nullptr) {
+			UsedHand = EHand::Both;
+		}
+		else {
+			GEngine->AddOnScreenDebugMessage(1, 3.0f, FColor::Red, "Object too heavy. Both hands needed!", false);
+
+			UnstackItems(BaseItemToPick);
+
+			BaseItemToPick = nullptr;
+			PlayerCharacter->bRaytraceEnabled = true;
+			return;
+		}
+	}
+
+	GeneratePickupEvent(BaseItemToPick, UsedHand);
 }
 
-void UCPickup::PickupItem(bool bIsRightHand)
+void UCPickup::PickupItem(/*bool bIsRightHand*/)
 {
-	if (BaseItemToPick == nullptr) return;
-
-	DisableShadowItems();
+	if (BaseItemToPick == nullptr || bItemCanBePickedUp == false) {
+		SetMovementSpeed(-MassOfLastItemPickedUp);
+		return;
+	}
 
 	FAttachmentTransformRules TransformRules = FAttachmentTransformRules::KeepWorldTransform;
 	TransformRules.bWeldSimulatedBodies = true;
@@ -240,20 +212,35 @@ void UCPickup::PickupItem(bool bIsRightHand)
 	BaseItemToPick->SetActorRelativeLocation(FVector::ZeroVector, false, nullptr, ETeleportType::TeleportPhysics);
 	BaseItemToPick->SetActorRelativeRotation(FRotator::ZeroRotator);
 
+	FinishPickupEvent(BaseItemToPick);
+
+	BaseItemToPick->GetStaticMeshComponent()->SetSimulatePhysics(false);
+
+	// Disable collisions
+	if (bEnableCollisionOfItemsInHand == false) {
+		BaseItemToPick->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+		TArray<AActor*> Children;
+		BaseItemToPick->GetAttachedActors(Children);
+		for (auto& Child : Children) {
+			AStaticMeshActor* CastActor = Cast<AStaticMeshActor>(Child);
+			if (CastActor != nullptr) CastActor->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		}
+	}
+
 	BaseItemToPick = nullptr;
 
 	PlayerCharacter->bRaytraceEnabled = true;
 }
 
-void UCPickup::ShadowPickupItem(bool bIsRightHand)
+void UCPickup::ShadowPickupItem()
 {
 	if (ItemToHandle == nullptr) return;
 	if (BaseItemToPick == nullptr) return;
 
-	ItemsAndPositionToPickup.Empty();
 	DisableShadowItems();
 
-	FVector HandPosition;// = bIsRightHand ? PlayerCharacter->RightHandPosition->GetActorLocation() : PlayerCharacter->LeftHandPosition->GetActorLocation();
+	FVector HandPosition;
 
 	if (UsedHand == EHand::Right) {
 		HandPosition = RightHandActor->GetActorLocation();
@@ -329,34 +316,36 @@ void UCPickup::ShadowPickupItem(bool bIsRightHand)
 
 			if (SweepHit.GetActor() != nullptr) {
 				ShadowRoot->SetActorLocation(SweepHit.Location);
+				bItemCanBePickedUp = false;
 			}
 			else {
 				ShadowRoot->SetActorLocation(HandPosition);
+				bItemCanBePickedUp = true;
 			}
 		}
 	}
 	else {
 		ShadowRoot->SetActorLocation(HandPosition);
+		bItemCanBePickedUp = true;
 	}
 
 	ShadowBaseItem = ShadowRoot;
 }
 
-TMap<AStaticMeshActor*, FVector> UCPickup::GetStackOfItems(AStaticMeshActor* ActorToPickup)
+TArray<AStaticMeshActor*> UCPickup::CombineItemsToStack(AStaticMeshActor* ActorToPickup)
 {
-	TMap <AStaticMeshActor*, FVector> StackedItemsAndRelativePosition;
+	TArray<AStaticMeshActor*>  StackedItems;
 	int countNewItemsFound = 0;
 	do
 	{
 		countNewItemsFound = 0;
 		TArray<AActor*> IgnoredActors;
 
-		for (auto &elem : StackedItemsAndRelativePosition) {
-			IgnoredActors.Add(elem.Key);
+		for (auto &elem : StackedItems) {
+			IgnoredActors.Add(elem);
 		}
 
-		//FVector SecondPointOfSweep = ActorToPickup->GetActorLocation() + ActorToPickup->GetActorUpVector() * 100; // TODO hardcoded range 
-		FVector SecondPointOfSweep = ActorToPickup->GetActorLocation() + FVector::UpVector * 100; // TODO hardcoded range 
+		FVector SecondPointOfSweep = ActorToPickup->GetActorLocation() + FVector::UpVector * STACKCHECK_RANGE;
 		TArray<FHitResult> SweptActors;
 		FComponentQueryParams Params;
 		Params.AddIgnoredComponent_LikelyDuplicatedRoot(ActorToPickup->GetStaticMeshComponent());
@@ -377,7 +366,7 @@ TMap<AStaticMeshActor*, FVector> UCPickup::GetStackOfItems(AStaticMeshActor* Act
 				if (SetOfPickupItems.Contains(elem.GetActor())) {
 					AStaticMeshActor* CastedActor = Cast<AStaticMeshActor>(elem.GetActor());
 
-					if (StackedItemsAndRelativePosition.Contains(CastedActor)) continue;
+					if (StackedItems.Contains(CastedActor)) continue;
 
 					UE_LOG(LogTemp, Warning, TEXT("Found item while sweeping %s"), *elem.GetActor()->GetName());
 					FVector elemLocation = elem.GetActor()->GetActorLocation();
@@ -392,31 +381,32 @@ TMap<AStaticMeshActor*, FVector> UCPickup::GetStackOfItems(AStaticMeshActor* Act
 
 
 					if (CastedActor != nullptr) {
-						StackedItemsAndRelativePosition.Add(CastedActor, DeltaPosition);
+						StackedItems.Add(CastedActor);
 						countNewItemsFound++;
 					}
+				}
+				else if (elem.GetActor()->GetActorLocation().Z >= ActorToPickup->GetActorLocation().Z) {
+					break; // Break at non-pickupable item which is above our base item (It's probably a shelf or something)
 
-
-					// TODO Check if this item is on antoher shelf above
 				}
 			}
 		}
 	} while (countNewItemsFound > 0);
 
-	return StackedItemsAndRelativePosition;
+	return StackedItems;
 }
 
 AStaticMeshActor * UCPickup::GetItemStack(AStaticMeshActor * BaseItem)
 {
-	TMap<AStaticMeshActor*, FVector> MapOfStackedItems = GetStackOfItems(BaseItem);
+	TArray<AStaticMeshActor*>  StackOfItems = CombineItemsToStack(BaseItem);
 
-	MapOfStackedItems.Remove(BaseItem);
+	StackOfItems.Remove(BaseItem);
 
-	for (auto& ChildItem : MapOfStackedItems) {
+	for (auto& ChildItem : StackOfItems) {
 		FAttachmentTransformRules TransformRules = FAttachmentTransformRules::KeepWorldTransform;
 		TransformRules.bWeldSimulatedBodies = true;
 
-		ChildItem.Key->AttachToActor(BaseItem, TransformRules);
+		ChildItem->AttachToActor(BaseItem, TransformRules);
 	}
 
 	return BaseItem;
@@ -425,8 +415,6 @@ AStaticMeshActor * UCPickup::GetItemStack(AStaticMeshActor * BaseItem)
 AStaticMeshActor * UCPickup::GetNewShadowItem(AStaticMeshActor * FromActor)
 {
 	FActorSpawnParameters Parameters;
-	// Parameters.Template = FromActor;
-	// Parameters.Name = FName(*FromActor->GetName().Append("_Shadow"));
 	AStaticMeshActor* NewShadowPickupItem = GetWorld()->SpawnActor<AStaticMeshActor>(AStaticMeshActor::StaticClass(), Parameters);
 
 	NewShadowPickupItem->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);
@@ -444,6 +432,28 @@ AStaticMeshActor * UCPickup::GetNewShadowItem(AStaticMeshActor * FromActor)
 	return NewShadowPickupItem;
 }
 
+void UCPickup::UnstackItems(AStaticMeshActor * BaseItem)
+{
+	if (BaseItem == nullptr) return;
+
+	TArray<AActor*> ChildItemsOfBaseItem;
+	BaseItem->GetAttachedActors(ChildItemsOfBaseItem);
+
+	BaseItem->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+	BaseItem->GetStaticMeshComponent()->SetSimulatePhysics(true);
+	BaseItem->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+
+	for (auto& DroppedItem : ChildItemsOfBaseItem) {
+		AStaticMeshActor* CastActor = Cast<AStaticMeshActor>(DroppedItem);
+		DroppedItem->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+
+		if (CastActor != nullptr) {
+			CastActor->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+			CastActor->GetStaticMeshComponent()->SetSimulatePhysics(true);
+		}
+	}
+}
+
 FHitResult UCPickup::CheckForCollision(FVector From, FVector To, AStaticMeshActor * ItemToSweep, TArray<AActor*> IgnoredActors)
 {
 	TArray<FHitResult> Hits;
@@ -451,16 +461,13 @@ FHitResult UCPickup::CheckForCollision(FVector From, FVector To, AStaticMeshActo
 
 	Params.AddIgnoredActors(IgnoredActors);
 	Params.AddIgnoredActor(GetOwner()); // Always ignore player
+	Params.AddIgnoredComponents(PlayerCharacter->USemLogContactManagers); // Ignore SLContactManager hit box
 
 	GetWorld()->ComponentSweepMulti(Hits, ItemToSweep->GetStaticMeshComponent(), From, To, ItemToSweep->GetActorRotation(), Params);
 
 
 
 	if (Hits.Num() > 0) {
-		//for (auto& Hit : Hits) {
-		//	if (Hit.GetActor() != nullptr) UE_LOG(LogTemp, Warning, TEXT("Hit %s"), *Hit.GetActor()->GetName());
-		//}
-
 		return Hits[0];
 	}
 
@@ -482,6 +489,17 @@ void UCPickup::DisableShadowItems()
 	}
 }
 
+FVector UCPickup::GetPositionOnSurface(AActor * Item, FVector PointOnSurface)
+{
+	FVector ItemOrigin;
+	FVector ItemBoundExtend;
+	Item->GetActorBounds(false, ItemOrigin, ItemBoundExtend);
+
+	FVector DeltaOfPivotToCenter = ItemOrigin - Item->GetActorLocation();
+
+	return FVector(PointOnSurface.X, PointOnSurface.Y, PointOnSurface.Z + ItemBoundExtend.Z) - DeltaOfPivotToCenter;
+}
+
 FHitResult UCPickup::RaytraceWithIgnoredActors(TArray<AActor*> IgnoredActors, FVector StartOffset, FVector TargetOffset)
 {
 	FHitResult RaycastResult;
@@ -492,7 +510,7 @@ FHitResult UCPickup::RaytraceWithIgnoredActors(TArray<AActor*> IgnoredActors, FV
 	PlayerCharacter->Controller->GetPlayerViewPoint(CamLoc, CamRot); // Get the camera position and rotation
 	const FVector StartTrace = CamLoc + StartOffset; // trace start is the camera location
 	const FVector Direction = CamRot.Vector();
-	const FVector EndTrace = StartTrace + Direction * RAYCAST_RANGE + TargetOffset; // and trace end is the camera location + an offset in the direction
+	const FVector EndTrace = StartTrace + Direction * RaycastRange + TargetOffset; // and trace end is the camera location + an offset in the direction
 
 	FCollisionQueryParams TraceParams;
 	TraceParams.AddIgnoredActors(IgnoredActors);
@@ -506,15 +524,393 @@ FHitResult UCPickup::RaytraceWithIgnoredActors(TArray<AActor*> IgnoredActors, FV
 
 	if (ShadowBaseItem != nullptr) TraceParams.AddIgnoredActor(ShadowBaseItem); // Always ignore shadow item
 	TraceParams.AddIgnoredActor(GetOwner()); // Always ignore player
+	TraceParams.AddIgnoredComponents(PlayerCharacter->USemLogContactManagers);
 
 	GetWorld()->LineTraceSingleByChannel(RaycastResult, StartTrace, EndTrace, ECollisionChannel::ECC_Visibility, TraceParams);
+
 	return RaycastResult;
 }
 
-void UCPickup::ResetRotationOfItemsInHand()
+void UCPickup::SetupKeyBindings(UInputComponent* PlayerInputComponent)
 {
-	if (ItemInRightHand != nullptr) ItemInRightHand->SetActorRotation(FRotator::ZeroRotator);
-	if (ItemInLeftHand != nullptr) ItemInLeftHand->SetActorRotation(FRotator::ZeroRotator);
+	PlayerInputComponent->BindAction("LeftHandAction", IE_Pressed, this, &UCPickup::InputLeftHandPressed);
+	PlayerInputComponent->BindAction("LeftHandAction", IE_Released, this, &UCPickup::InputLeftHandReleased);
+
+	PlayerInputComponent->BindAction("RightHandAction", IE_Pressed, this, &UCPickup::InputRightHandPressed);
+	PlayerInputComponent->BindAction("RightHandAction", IE_Released, this, &UCPickup::InputRightHandReleased);
+
+	PlayerInputComponent->BindAction("ForceDrop", IE_Pressed, this, &UCPickup::InputForceDrop);
+	PlayerInputComponent->BindAction("ForceDrop", IE_Released, this, &UCPickup::InputForceDrop);
+
+	PlayerInputComponent->BindAction("DragObject", IE_Pressed, this, &UCPickup::InputDragging);
+	PlayerInputComponent->BindAction("DragObject", IE_Released, this, &UCPickup::InputDragging);
+
+	PlayerInputComponent->BindAction("ForceSinglePickup", IE_Pressed, this, &UCPickup::InputForceSinglePickup);
+	PlayerInputComponent->BindAction("ForceSinglePickup", IE_Released, this, &UCPickup::InputForceSinglePickup);
+
+	PlayerInputComponent->BindAction("RotateDroppingItem", IE_Pressed, this, &UCPickup::StepRotation);
+}
+
+void UCPickup::InputLeftHandPressed()
+{
+	if (bLeftMouseHold) return; // We already clicked that key
+	if (bRightMouseHold) return; // Ignore this call if the other key has been pressed
+	if (bIsStackChecking) return; // Don't react if stackchecking is active
+
+	bLeftMouseHold = true;
+	UsedHand = EHand::Left;
+	OnInteractionKeyPressed(false);
+}
+
+void UCPickup::InputLeftHandReleased()
+{
+	if (bLeftMouseHold == false) return; // We can't release if we didn't clicked first
+	if (bRightMouseHold) return; // Ignore this call if the other key has been pressed
+	if (bIsStackChecking) return; // Don't react if stackchecking is active
+
+	bLeftMouseHold = false;
+	OnInteractionKeyReleased(false);
+}
+
+void UCPickup::InputRightHandPressed()
+{
+	if (bRightMouseHold) return; // We already clicked that key
+	if (bLeftMouseHold) return; // Ignore this call if the other key has been pressed
+	if (bIsStackChecking) return; // Don't react if stackchecking is active
+
+	bRightMouseHold = true;
+	UsedHand = EHand::Right;
+	OnInteractionKeyPressed(true);
+}
+
+void UCPickup::InputRightHandReleased()
+{
+	if (bRightMouseHold == false) return;  // We can't release if we didn't clicked first
+	if (bLeftMouseHold) return; // Ignore this call if the other key has been pressed
+	if (bIsStackChecking) return; // Don't react if stackchecking is active
+
+	bRightMouseHold = false;
+	OnInteractionKeyReleased(true);
+}
+
+void UCPickup::InputForceDrop()
+{
+	bForceDropKeyDown = !bForceDropKeyDown;
+}
+
+void UCPickup::InputDragging()
+{
+	bDraggingKeyDown = !bDraggingKeyDown;
+}
+
+void UCPickup::InputForceSinglePickup()
+{
+	bForceSinglePickupKeyDown = !bForceSinglePickupKeyDown;
+
+	float MessageDisplayTime = 0;
+	if (bForceSinglePickupKeyDown) {
+		MessageDisplayTime = 100000.0f;
+	}
+
+	GEngine->AddOnScreenDebugMessage(3, MessageDisplayTime, FColor::Green, "Single Item Pickup", false);
+}
+
+void UCPickup::StepRotation()
+{
+	RotationOfItemToDrop += FRotator::MakeFromEuler(FVector(0, 0, 90));
+}
+
+void UCPickup::OnInteractionKeyPressed(bool bIsRightKey)
+{
+	if (ItemToHandle != nullptr && bForceDropKeyDown == false) {
+		if (SetOfPickupItems.Contains(ItemToHandle)) {
+			if (bDraggingKeyDown) {
+				StartDrag(); // We only want to drag the item
+			}
+			else {
+				if (bIsRightKey) {
+					// Right hand handling
+					if (ItemInRightHand == nullptr) {
+						StartPickup();
+					}
+					else {
+						if (bIsItemDropping == false) StartDropItem();
+					}
+				}
+				else {
+					// Left hand handling
+					if (ItemInLeftHand == nullptr) {
+						StartPickup();
+					}
+					else {
+						if (bIsItemDropping == false) StartDropItem();
+					}
+				}
+			}
+		}
+	}
+	else {
+		if (bIsItemDropping == false) StartDropItem();
+	}
+}
+
+void UCPickup::OnInteractionKeyHold(bool bIsRightKey)
+{
+	if (bIsDragging) {
+		DragItem();
+	}
+	else if (bIsItemDropping) {
+		ShadowDropItem();
+	}
+	else {
+		ShadowPickupItem();
+	}
+}
+
+void UCPickup::OnInteractionKeyReleased(bool bIsRightKey)
+{
+	if (bIsDragging) {
+		EndDrag();
+	}
+	else if (bIsItemDropping) {
+		DropItem();
+	}
+	else if (bPerformStabilityCheckForStacks) {
+		StartStackCheck();
+	}
+	else {
+		PickupItem();
+	}
+
+	ResetComponentState();
+}
+
+void UCPickup::ResetComponentState()
+{
+	DisableShadowItems();
+	SetLockedByComponent(false);
+	PlayerCharacter->bRaytraceEnabled = true;
+	CancelDetachItems();
+}
+
+
+void UCPickup::GeneratePickupEvent(AActor * ItemToPickup, EHand HandPosition)
+{
+	if (SemLogRuntimeManager == nullptr) return;
+	if (ItemToPickup != nullptr) {
+		FString HandPositionString;
+
+		switch (HandPosition)
+		{
+		case EHand::Left: HandPositionString = "LeftHand";
+			break;
+		case EHand::Right: HandPositionString = "RightHand";
+			break;
+		case EHand::Both: HandPositionString = "BothHands";
+			break;
+		default:
+			break;
+		}
+
+		// Log Pickup event
+		const FString ItemClass = FTagStatics::GetKeyValue(ItemToPickup, SEMLOG_TAG, "Class");
+		const FString ItemID = FTagStatics::GetKeyValue(ItemToPickup, SEMLOG_TAG, "Id");
+
+		// Create contact event and other actor individual
+		const FOwlIndividualName OtherIndividual("log", ItemClass, ItemID);
+		const FOwlIndividualName ContactIndividual("log", "PickupSituation", FSLUtils::GenerateRandomFString(4));
+
+		// Owl prefixed names
+		const FOwlPrefixName RdfType("rdf", "type");
+		const FOwlPrefixName RdfAbout("rdf", "about");
+		const FOwlPrefixName RdfResource("rdf", "resource");
+		const FOwlPrefixName RdfDatatype("rdf", "datatype");
+		const FOwlPrefixName TaskContext("knowrob", "taskContext");
+		const FOwlPrefixName InContact("knowrob_u", "inContact");
+		const FOwlPrefixName OwlNamedIndividual("owl", "NamedIndividual");
+
+		// Owl classes
+		const FOwlClass XsdString("xsd", "string");
+		const FOwlClass TouchingSituation("knowrob_u", "PickupSituation");
+
+		TArray <FOwlTriple> Properties;
+		Properties.Add(FOwlTriple(RdfType, RdfResource, TouchingSituation));
+		Properties.Add(FOwlTriple(TaskContext, RdfDatatype, XsdString, "Pickup-" + HandPositionString));
+		Properties.Add(FOwlTriple(InContact, RdfResource, OtherIndividual));
+
+		TSharedPtr<FOwlNode> ContactEvent = MakeShareable(new FOwlNode(OwlNamedIndividual, RdfAbout, ContactIndividual, Properties));
+
+		// Start the event with the given properties
+		if (SemLogRuntimeManager->StartEvent(ContactEvent))
+		{
+			// Add event to the local map of started events
+			OtherActorToEvent.Emplace(ItemToPickup, ContactEvent);
+		}
+
+		if (PlayerCharacter->LogComponent != nullptr) PlayerCharacter->LogComponent->StartEvent(ContactEvent);
+	}
+}
+
+void UCPickup::FinishPickupEvent(AActor * ItemToPickup)
+{
+	if (SemLogRuntimeManager == nullptr) return;
+
+	if (OtherActorToEvent.Contains(ItemToPickup)) {
+		TSharedPtr<FOwlNode> Event = OtherActorToEvent[ItemToPickup];
+
+		if (PlayerCharacter->LogComponent != nullptr) PlayerCharacter->LogComponent->FinishEvent(Event);
+		SemLogRuntimeManager->FinishEvent(Event);
+
+		OtherActorToEvent.Remove(ItemToPickup);
+	}
+}
+
+void UCPickup::GenerateDropEvent(AActor * ItemToDrop, EHand FromHandPosition)
+{
+	if (SemLogRuntimeManager == nullptr) return;
+
+	if (ItemToDrop != nullptr) {
+		FString HandPositionString;
+
+		switch (FromHandPosition)
+		{
+		case EHand::Left: HandPositionString = "LeftHand";
+			break;
+		case EHand::Right: HandPositionString = "RightHand";
+			break;
+		case EHand::Both: HandPositionString = "BothHands";
+			break;
+		default:
+			break;
+		}
+
+		// Log Pickup event
+		const FString ItemClass = FTagStatics::GetKeyValue(ItemToDrop, SEMLOG_TAG, "Class");
+		const FString ItemID = FTagStatics::GetKeyValue(ItemToDrop, SEMLOG_TAG, "Id");
+
+		// Create contact event and other actor individual
+		const FOwlIndividualName OtherIndividual("log", ItemClass, ItemID);
+		const FOwlIndividualName ContactIndividual("log", "DropSituation", FSLUtils::GenerateRandomFString(4));
+
+		// Owl prefixed names
+		const FOwlPrefixName RdfType("rdf", "type");
+		const FOwlPrefixName RdfAbout("rdf", "about");
+		const FOwlPrefixName RdfResource("rdf", "resource");
+		const FOwlPrefixName RdfDatatype("rdf", "datatype");
+		const FOwlPrefixName TaskContext("knowrob", "taskContext");
+		const FOwlPrefixName InContact("knowrob_u", "inContact");
+		const FOwlPrefixName OwlNamedIndividual("owl", "NamedIndividual");
+
+		// Owl classes
+		const FOwlClass XsdString("xsd", "string");
+		const FOwlClass TouchingSituation("knowrob_u", "DropSituation");
+
+		TArray <FOwlTriple> Properties;
+		Properties.Add(FOwlTriple(RdfType, RdfResource, TouchingSituation));
+		Properties.Add(FOwlTriple(TaskContext, RdfDatatype, XsdString, "Drop-" + HandPositionString));
+		Properties.Add(FOwlTriple(InContact, RdfResource, OtherIndividual));
+
+		TSharedPtr<FOwlNode> ContactEvent = MakeShareable(new FOwlNode(OwlNamedIndividual, RdfAbout, ContactIndividual, Properties));
+
+		// Start the event with the given properties
+		if (SemLogRuntimeManager->StartEvent(ContactEvent))
+		{
+			// Add event to the local map of started events
+			OtherActorToEvent.Emplace(ItemToDrop, ContactEvent);
+		}
+
+		if (PlayerCharacter->LogComponent != nullptr) PlayerCharacter->LogComponent->StartEvent(ContactEvent);
+	}
+	else {
+		UE_LOG(LogTemp, Warning, TEXT("UCPickup::GenerateDropEvent: ItemToDrop is null"));
+	}
+}
+
+void UCPickup::FinishDropEvent(AActor * ItemToDrop)
+{
+	if (SemLogRuntimeManager == nullptr || ItemToDrop == nullptr) return;
+
+	if (OtherActorToEvent.Contains(ItemToDrop)) {
+		TSharedPtr<FOwlNode> Event = OtherActorToEvent[ItemToDrop];
+
+		if (PlayerCharacter->LogComponent != nullptr) PlayerCharacter->LogComponent->FinishEvent(Event);
+		SemLogRuntimeManager->FinishEvent(Event);
+
+		OtherActorToEvent.Remove(ItemToDrop);
+	}
+}
+
+void UCPickup::GenerateDragEvent(AActor * ItemToDrag, EHand FromHandPosition)
+{
+	if (SemLogRuntimeManager == nullptr) return;
+
+	if (ItemToDrag != nullptr) {
+
+		FString HandPositionString;
+
+		switch (FromHandPosition)
+		{
+		case EHand::Left: HandPositionString = "LeftHand";
+			break;
+		case EHand::Right: HandPositionString = "RightHand";
+			break;
+		case EHand::Both: HandPositionString = "BothHands";
+			break;
+		default:
+			break;
+		}
+
+		// Log Pickup event
+		const FString ItemClass = FTagStatics::GetKeyValue(ItemToDrag, SEMLOG_TAG, "Class");
+		const FString ItemID = FTagStatics::GetKeyValue(ItemToDrag, SEMLOG_TAG, "Id");
+
+		// Create contact event and other actor individual
+		const FOwlIndividualName OtherIndividual("log", ItemClass, ItemID);
+		const FOwlIndividualName ContactIndividual("log", "DragSituation", FSLUtils::GenerateRandomFString(4));
+
+		// Owl prefixed names
+		const FOwlPrefixName RdfType("rdf", "type");
+		const FOwlPrefixName RdfAbout("rdf", "about");
+		const FOwlPrefixName RdfResource("rdf", "resource");
+		const FOwlPrefixName RdfDatatype("rdf", "datatype");
+		const FOwlPrefixName TaskContext("knowrob", "taskContext");
+		const FOwlPrefixName InContact("knowrob_u", "inContact");
+		const FOwlPrefixName OwlNamedIndividual("owl", "NamedIndividual");
+
+		// Owl classes
+		const FOwlClass XsdString("xsd", "string");
+		const FOwlClass TouchingSituation("knowrob_u", "DragSituation");
+
+		TArray <FOwlTriple> Properties;
+		Properties.Add(FOwlTriple(RdfType, RdfResource, TouchingSituation));
+		Properties.Add(FOwlTriple(TaskContext, RdfDatatype, XsdString, "Drag-" + HandPositionString));
+		Properties.Add(FOwlTriple(InContact, RdfResource, OtherIndividual));
+
+		TSharedPtr<FOwlNode> ContactEvent = MakeShareable(new FOwlNode(OwlNamedIndividual, RdfAbout, ContactIndividual, Properties));
+
+		// Start the event with the given properties
+		if (SemLogRuntimeManager->StartEvent(ContactEvent))
+		{
+			// Add event to the local map of started events
+			OtherActorToEvent.Emplace(ItemToDrag, ContactEvent);
+		}
+
+		if (PlayerCharacter->LogComponent != nullptr) PlayerCharacter->LogComponent->StartEvent(ContactEvent);
+	}
+}
+
+void UCPickup::FinishDragEvent(AActor * ItemToDrag)
+{
+	if (SemLogRuntimeManager == nullptr) return;
+
+	if (OtherActorToEvent.Contains(ItemToDrag)) {
+		TSharedPtr<FOwlNode> Event = OtherActorToEvent[ItemToDrag];
+
+		if (PlayerCharacter->LogComponent != nullptr) PlayerCharacter->LogComponent->FinishEvent(Event);
+		SemLogRuntimeManager->FinishEvent(Event);
+
+		OtherActorToEvent.Remove(ItemToDrag);
+	}
 }
 
 void UCPickup::StartStackCheck()
@@ -523,7 +919,7 @@ void UCPickup::StartStackCheck()
 		TArray<AActor*> Children;
 		BaseItemToPick->GetAttachedActors(Children);
 		if (Children.Num() == 0) {
-			PickupItem(bRightHandPickup); // We don't pickup a stack but a single item
+			PickupItem(); // We don't pickup a stack but a single item
 			return;
 		}
 
@@ -544,10 +940,15 @@ void UCPickup::OnStackCheckIsDone(bool wasSuccessful)
 	if (bStackCheckSuccess) {
 		UE_LOG(LogTemp, Warning, TEXT("Stackcheck sucessful"));
 		BaseItemToPick = GetItemStack(ItemToHandle); // We need to reassign the whole stack
-		PickupItem(bRightHandPickup);
+		PickupItem();
 	}
 	else {
 		UE_LOG(LogTemp, Warning, TEXT("Stackcheck failed"));
+		if (BaseItemToPick != nullptr) {
+			SetMovementSpeed(-MassOfLastItemPickedUp);
+			UnstackItems(BaseItemToPick);
+			FinishPickupEvent(BaseItemToPick); // Still create the finish event
+		}
 	}
 
 	bIsStackChecking = false;
@@ -557,16 +958,34 @@ void UCPickup::OnStackCheckIsDone(bool wasSuccessful)
 	}
 }
 
-void UCPickup::StartDrag(bool bIsRightHand)
+void UCPickup::StartDrag()
 {
 	ItemToDrag = ItemToHandle;
 	bIsDragging = true;
 
+	// Raycast
+	TArray<AActor*> IgnoredActors;
+	IgnoredActors.Add(ItemToDrag);
+	FHitResult RaycastResult = RaytraceWithIgnoredActors(IgnoredActors);
+
+	FVector RayPosition = RaycastResult.Location;
+	DeltaVectorToDrag = ItemToDrag->GetActorLocation() - RayPosition;
+	DeltaVectorToDrag.Z = 0;
+
 	SetLockedByComponent(true);
+
+	GenerateDragEvent(ItemToDrag, UsedHand);
 }
 
-void UCPickup::DragItem(bool bIsRightHand)
+void UCPickup::DragItem()
 {
+	if (ItemToDrag == nullptr) return;
+	if (UsedHand == EHand::Right && ItemInRightHand != nullptr || UsedHand == EHand::Left && ItemInLeftHand != nullptr || UsedHand == EHand::Both && ItemInLeftHand != nullptr) {
+		// We can't drag with a hand which holds an item
+		GEngine->AddOnScreenDebugMessage(1, 3.0f, FColor::Red, "Hand(s) not empty. Can't interact", false);
+		return;
+	}
+
 	TArray<AActor*> IgnoredActors;
 	IgnoredActors.Add(ItemToDrag);
 
@@ -576,32 +995,50 @@ void UCPickup::DragItem(bool bIsRightHand)
 
 	if (RayPosition.IsZero() == false)
 	{
-		FVector ItemOrigin;
-		FVector ItemBoundExtend;
-		ItemToDrag->GetActorBounds(false, ItemOrigin, ItemBoundExtend);
-
-		FVector DeltaOfPivotToCenter = ItemOrigin - ItemToDrag->GetActorLocation();
-
-		//FVector NewPosition = RayPosition + FVector(0, 0, ItemBoundExtend.Z) - DeltaOfPivotToCenter;
-		FVector NewPosition = FVector(RayPosition.X, RayPosition.Y, ItemOrigin.Z) - DeltaOfPivotToCenter;
-
-		ItemToDrag->SetActorLocation(NewPosition);
-		// ItemToDrag->SetActorRotation(FRotator::ZeroRotator);
+		FVector PointOnSurface = GetPositionOnSurface(ItemToDrag, RayPosition);
+		ItemToDrag->SetActorLocation(FVector(PointOnSurface.X, PointOnSurface.Y, ItemToDrag->GetActorLocation().Z) + DeltaVectorToDrag);
 	}
 
 }
 
 void UCPickup::EndDrag()
 {
+	FinishDragEvent(ItemToDrag);
 	ItemToDrag = nullptr;
 	bIsDragging = false;
 }
 
-void UCPickup::DropItem(bool bIsRightHand)
+void UCPickup::StartDropItem()
 {
+	bIsItemDropping = true;
+	SetLockedByComponent(true);
+
+	RotationOfItemToDrop = FRotator::ZeroRotator;
+
+	if (ItemInLeftHand == ItemInRightHand && ItemInLeftHand != nullptr) {
+		GenerateDropEvent(ItemInLeftHand, EHand::Both);
+	}
+	else if (UsedHand == EHand::Right && ItemInRightHand != nullptr) {
+		GenerateDropEvent(ItemInRightHand, EHand::Right);
+	}
+	else if (UsedHand == EHand::Left && ItemInLeftHand != nullptr) {
+		GenerateDropEvent(ItemInLeftHand, EHand::Left);
+	}
+}
+
+void UCPickup::DropItem()
+{
+	bIsItemDropping = false;
 	if (ShadowBaseItem == nullptr) return;
 
-	AStaticMeshActor* ItemToDrop = bIsRightHand ? ItemInRightHand : ItemInLeftHand;
+	AStaticMeshActor* ItemToDrop;
+
+	if (UsedHand == EHand::Right) {
+		ItemToDrop = ItemInRightHand;
+	}
+	else {
+		ItemToDrop = ItemInLeftHand; // Left hand or both hand item
+	}
 
 	if (ItemToDrop == nullptr) return;
 
@@ -611,34 +1048,55 @@ void UCPickup::DropItem(bool bIsRightHand)
 	ItemToDrop->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
 	ItemToDrop->GetStaticMeshComponent()->SetSimulatePhysics(true);
 	ItemToDrop->SetActorLocation(ShadowBaseItem->GetActorLocation());
+	ItemToDrop->SetActorRotation(ShadowBaseItem->GetActorRotation());
 	ItemToDrop->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 
+	float Mass = 0;
 
 	for (auto& DroppedItem : ChildItemsOfBaseItem) {
 		AStaticMeshActor* CastActor = Cast<AStaticMeshActor>(DroppedItem);
 		DroppedItem->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
 
-		if (CastActor == nullptr) return;
-		CastActor->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		CastActor->GetStaticMeshComponent()->SetSimulatePhysics(true);
+		if (CastActor != nullptr) {
+			CastActor->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+			CastActor->GetStaticMeshComponent()->SetSimulatePhysics(true);
+
+			Mass += CastActor->GetStaticMeshComponent()->GetMass();
+		}
+	}
+
+	FinishDropEvent(ItemToDrop);
+
+	Mass += ItemToDrop->GetStaticMeshComponent()->GetMass();
+	if (bMassEffectsMovementSpeed) {
+		SetMovementSpeed(-Mass);
 	}
 
 	if (ItemInRightHand == ItemInLeftHand) {
 		ItemInRightHand = ItemInLeftHand = nullptr;
 	}
-	else if (bIsRightHand) {
+	else if (UsedHand == EHand::Right) {
 		ItemInRightHand = nullptr;
 	}
-	else {
+	else if (UsedHand == EHand::Left) {
 		ItemInLeftHand = nullptr;
 	}
+
+
 }
 
-void UCPickup::ShadowDropItem(bool bIsRightHand)
+void UCPickup::ShadowDropItem()
 {
 	DisableShadowItems();
 
-	AStaticMeshActor* ItemToDrop = bIsRightHand ? ItemInRightHand : ItemInLeftHand;
+	AStaticMeshActor* ItemToDrop;
+
+	if (UsedHand == EHand::Right) {
+		ItemToDrop = ItemInRightHand;
+	}
+	else {
+		ItemToDrop = ItemInLeftHand; // Left hand or both hand item
+	}
 
 	if (ItemToDrop == nullptr) return;
 
@@ -646,14 +1104,17 @@ void UCPickup::ShadowDropItem(bool bIsRightHand)
 	ItemToDrop->GetAttachedActors(ChildItemsOfBaseItem);
 
 	AStaticMeshActor* ShadowRoot = GetNewShadowItem(ItemToDrop);
-	ItemToDrop->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
+	ItemToDrop->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 	ShadowItems.Add(ShadowRoot);
+
+	TArray<AActor*> IgnoredActors; // Actors that get ignored by following raytrace
+	IgnoredActors.Add(ItemToDrop);
 
 	for (auto& ItemToShadow : ChildItemsOfBaseItem) {
 		AStaticMeshActor* CastActor = Cast<AStaticMeshActor>(ItemToShadow);
 
 		if (CastActor == nullptr) return;
-		CastActor->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
+		CastActor->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 
 		AStaticMeshActor* ShadowItem = GetNewShadowItem(CastActor);
 		ShadowItems.Add(ShadowItem);
@@ -663,56 +1124,93 @@ void UCPickup::ShadowDropItem(bool bIsRightHand)
 		TransformRules.bWeldSimulatedBodies = true;
 
 		ShadowItem->AttachToActor(ShadowRoot, TransformRules);
+		IgnoredActors.Add(CastActor);
 	}
-
-	ShadowBaseItem = ShadowRoot;
 
 	FVector CamLoc;
 	FRotator CamRot;
 	PlayerCharacter->Controller->GetPlayerViewPoint(CamLoc, CamRot); // Get the camera position and rotation
 
-	FHitResult RaycastHit = RaytraceWithIgnoredActors(ChildItemsOfBaseItem);
+	FHitResult RaycastHit = RaytraceWithIgnoredActors(IgnoredActors);
 
-	if (RaycastHit.Location != FVector::ZeroVector) {
-		FVector FromPosition = CamLoc;
-		FVector ToPosition = RaycastHit.Location;
+	if (RaycastHit.Actor != nullptr) {
 
-		// *** Ignored Actors
-		TArray<AActor*> IgnoredActors = ChildItemsOfBaseItem; // ignore items to pickup 
-		IgnoredActors.Add(BaseItemToPick);
-		IgnoredActors.Append(ShadowItems); //All shadow items are ignored
-		IgnoredActors.Add(ItemInLeftHand);
-		IgnoredActors.Add(ItemInRightHand);
+		if (bCheckForCollisionsOnDrop) {
+			ShadowRoot->SetActorRotation(ShadowRoot->GetActorRotation() + RotationOfItemToDrop);
 
-		// Add all children in hands to ignored actors
-		if (ItemInLeftHand != nullptr) {
-			TArray<AActor*> ChildrenInLeftHand;
-			ItemInLeftHand->GetAttachedActors(ChildrenInLeftHand);
+			// Checking for collisions between the player and the position the player wants to drop the item
+			FVector FromPosition = CamLoc;
+			FVector ToPosition = RaycastHit.Location;
 
-			IgnoredActors.Append(ChildrenInLeftHand);
+			// *** Ignored Actors
+			TArray<AActor*> IgnoredActors = ChildItemsOfBaseItem; // ignore items to pickup 
+			IgnoredActors.Add(BaseItemToPick);
+			IgnoredActors.Append(ShadowItems); //All shadow items are ignored
+			IgnoredActors.Add(ItemInLeftHand);
+			IgnoredActors.Add(ItemInRightHand);
+
+			// Add all children in hands to ignored actors
+			if (ItemInLeftHand != nullptr) {
+				TArray<AActor*> ChildrenInLeftHand;
+				ItemInLeftHand->GetAttachedActors(ChildrenInLeftHand);
+
+				IgnoredActors.Append(ChildrenInLeftHand);
+			}
+			if (ItemInRightHand != nullptr) {
+				TArray<AActor*> ChildrenInRightHand;
+				ItemInRightHand->GetAttachedActors(ChildrenInRightHand);
+
+				IgnoredActors.Append(ChildrenInRightHand);
+			}
+			// *****************
+
+			FHitResult SweepHit = CheckForCollision(FromPosition, ToPosition, ShadowRoot, IgnoredActors);
+
+			if (SweepHit.GetActor() != nullptr) {
+				ShadowRoot->SetActorLocation(SweepHit.Location);
+				ShadowBaseItem = ShadowRoot;
+			}
 		}
-		if (ItemInRightHand != nullptr) {
-			TArray<AActor*> ChildrenInRightHand;
-			ItemInRightHand->GetAttachedActors(ChildrenInRightHand);
-
-			IgnoredActors.Append(ChildrenInRightHand);
+		else {
+			ShadowRoot->SetActorLocation(GetPositionOnSurface(ItemToDrop, RaycastHit.Location));
+			ShadowBaseItem = ShadowRoot;
 		}
-		// *****************
-
-		FHitResult SweepHit = CheckForCollision(FromPosition, ToPosition, ShadowRoot, IgnoredActors);
-
-		// ShadowRoot->SetActorScale3D(FVector(1.0f));
-
-		if (SweepHit.GetActor() != nullptr) {
-			ShadowRoot->SetActorLocation(SweepHit.Location);
-		}
+	}
+	else {
+		ShadowBaseItem = nullptr; // We didn't hit any surface
 	}
 }
 
 void UCPickup::CancelActions()
 {
 	bAllCanceled = true;
-	CancelDetachItems();
+	ResetComponentState();
+
+
+	if (bIsItemDropping == false) {
+		// Pick up event canceled
+		if (BaseItemToPick != nullptr) {
+			SetMovementSpeed(-MassOfLastItemPickedUp);
+
+			if (OtherActorToEvent.Contains(BaseItemToPick)) {
+				PlayerCharacter->LogComponent->CancelEvent(OtherActorToEvent[BaseItemToPick]);
+			}
+		}
+	}
+	else {
+		// Drop event canceled
+		if (ItemInLeftHand != nullptr && OtherActorToEvent.Contains(ItemInLeftHand)) {
+			PlayerCharacter->LogComponent->CancelEvent(OtherActorToEvent[ItemInLeftHand]);
+		}
+		else if (ItemInRightHand != nullptr && OtherActorToEvent.Contains(ItemInRightHand)) {
+			PlayerCharacter->LogComponent->CancelEvent(OtherActorToEvent[ItemInRightHand]);
+		}
+	}
+
+	BaseItemToPick = nullptr;
+
+	bRightMouseHold = false;
+	bLeftMouseHold = false;
 }
 
 void UCPickup::StopCancelActions()
@@ -734,56 +1232,6 @@ void UCPickup::CancelDetachItems()
 	}
 }
 
-void UCPickup::AnimatePickup(float DeltaTime)
-{
-	/*if (PlayerCharacter->MovementComponent == nullptr) return;
-	if (AnimationList.Num() == 0)  return;
-
-	PlayerCharacter->MovementComponent->SetMovable(false);
-
-	TArray<FPickupAnimation> AnimsToKeep;
-
-	for (FPickupAnimation & elem : AnimationList)
-	{
-		elem.AnimateTick(DeltaTime);
-
-		if (elem.IsAnimationDone() == false)
-		{
-			AnimsToKeep.Add(elem);
-		}
-		else
-		{//The object is in the right position.
-
-			if (elem.bDropItem == false)
-			{
-				// We didn't drop the item
-
-				// Setup welding
-				elem.GetItem()->GetStaticMeshComponent()->BodyInstance.bAutoWeld = true;
-				FAttachmentTransformRules TransformRules = FAttachmentTransformRules::KeepWorldTransform;
-				TransformRules.bWeldSimulatedBodies = true;
-
-				if (elem.HandPosition == EHand::Right)
-				{
-					//	ItemsInRightHand.Add(elem.GetItem());
-
-						//	elem.GetItem()->AttachToActor(RightHandActor, TransformRules, NAME_None);
-				}
-				else if (elem.HandPosition == EHand::Left)
-				{
-					//	ItemsInLeftHand.Add(elem.GetItem());
-						//	elem.GetItem()->AttachToActor(LeftHandActor, TransformRules, NAME_None);
-				}
-			}
-
-			if (PlayerCharacter->MovementComponent != nullptr) PlayerCharacter->MovementComponent->SetMovable(true); // Let the player move again
-		}
-	}
-
-	AnimationList = AnimsToKeep;
-	*/
-}
-
 void UCPickup::SetLockedByComponent(bool bIsLocked)
 {
 	if (bIsLocked) {
@@ -801,7 +1249,7 @@ bool UCPickup::CalculateIfBothHandsNeeded()
 		float MassOfItem = BaseItemToPick->GetStaticMeshComponent()->GetMass();
 		UE_LOG(LogTemp, Warning, TEXT("Mass of object %f"), MassOfItem);
 
-		if (MassOfItem >= MassThresholdTouseBothHands) {
+		if (MassOfItem >= MassThresholdBothHands) {
 			BaseItemToPick->GetStaticMeshComponent()->SetSimulatePhysics(false);
 			return true;
 		}
@@ -811,7 +1259,7 @@ bool UCPickup::CalculateIfBothHandsNeeded()
 		float Volume = BaseItemToPick->GetStaticMeshComponent()->Bounds.GetBox().GetSize().SizeSquared();
 		UE_LOG(LogTemp, Warning, TEXT("Volume of object %f"), Volume);
 
-		if (Volume >= VolumeThresholdTouseBothHands) {
+		if (Volume >= VolumeThresholdBothHands) {
 			BaseItemToPick->GetStaticMeshComponent()->SetSimulatePhysics(false);
 			return true;
 		}
@@ -820,49 +1268,30 @@ bool UCPickup::CalculateIfBothHandsNeeded()
 	return false;
 }
 
-//void UCPickup::MoveItemsRelativeToHands(float DeltaTime)
-//{
-//	
-//	if (ItemsInRightHand.Num() > 0)
-//	{
-//		for (auto& item : ItemsInRightHand) {
-//			FVector HandPosition = PlayerCharacter->RightHandPosition->GetActorLocation();
-//			item.Key->SetActorLocation(HandPosition + item.Value);
-//			item.Key->SetActorRotation(GetOwner()->GetActorRotation());
-//
-//			item.Key->GetRootComponent()->ComponentVelocity = FVector::ZeroVector;
-//			item.Key->GetStaticMeshComponent()->SetPhysicsAngularVelocity(FVector::ZeroVector);
-//			item.Key->GetStaticMeshComponent()->SetPhysicsLinearVelocity(FVector::ZeroVector);
-//		}
-//	}
-//
-//	if (ItemsInLeftHand.Num() > 0)
-//	{
-//		for (auto& item : ItemsInLeftHand) {
-//			FVector HandPosition = PlayerCharacter->LeftHandPosition->GetActorLocation();
-//			item.Key->SetActorLocation(HandPosition + item.Value);
-//			item.Key->SetActorRotation(GetOwner()->GetActorRotation());
-//
-//			item.Key->GetRootComponent()->ComponentVelocity = FVector::ZeroVector;
-//			item.Key->GetStaticMeshComponent()->SetPhysicsAngularVelocity(FVector::ZeroVector);
-//			item.Key->GetStaticMeshComponent()->SetPhysicsLinearVelocity(FVector::ZeroVector);
-//		}
-//	}
-//	
-//}
+void UCPickup::SetMovementSpeed(float Weight)
+{
+	if (PlayerCharacter->MovementComponent == nullptr) return;
+	MassToCarry += Weight;
 
-//void UCPickup::UpdateShadowItem(AStaticMeshActor * FromActor)
-//{
-//	FActorSpawnParameters Parameters;
-//	Parameters.Template = FromActor;
-//	ShadowBaseItem = GetWorld()->SpawnActor<AStaticMeshActor>(AStaticMeshActor::StaticClass(), Parameters);
-//
-//	for (size_t i = 0; i < ShadowBaseItem->GetStaticMeshComponent()->GetMaterials().Num(); i++)
-//	{
-//		ShadowBaseItem->GetStaticMeshComponent()->SetMaterial(i, TransparentMaterial);
-//	}
-//
-//	ShadowBaseItem->GetStaticMeshComponent()->SetSimulatePhysics(false);
-//	ShadowBaseItem->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-//}
+	float MinSpeed = PlayerCharacter->MovementComponent->MinMovementSpeed;
+	float MaxSpeed = PlayerCharacter->MovementComponent->MaxMovementSpeed;
+
+	float NewSpeed = 0;
+
+	if (Weight <= 0 && ItemInLeftHand == nullptr && ItemInRightHand == nullptr) {	// Check if we still carry something
+		PlayerCharacter->MovementComponent->CurrentSpeed = PlayerCharacter->MovementComponent->MaxMovementSpeed;
+	}
+	else {
+		if (bUseQuadratricEquationForSpeedCalculation) {
+			NewSpeed = (MinSpeed - MaxSpeed) * MassToCarry * MassToCarry / (MaximumMassToCarry * MaximumMassToCarry) + MaxSpeed;
+		}
+		else {
+			NewSpeed = (MinSpeed - MaxSpeed) * MassToCarry / MaximumMassToCarry + MaxSpeed;
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("New speed %f"), NewSpeed);
+
+		PlayerCharacter->MovementComponent->CurrentSpeed = NewSpeed;
+	}
+}
 

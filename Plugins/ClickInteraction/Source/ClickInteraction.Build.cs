@@ -8,7 +8,7 @@ public class ClickInteraction : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 	
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "UTags" });
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "UTags", "SemLog" });
 
 		PrivateDependencyModuleNames.AddRange(new string[] {  });
 

@@ -7,11 +7,14 @@
 #include "GameFramework/Actor.h"
 #include "Engine/StaticMeshActor.h"
 #include "Curves/CurveFloat.h"
+#include "Curves/CurveVector.h"
 #include "Components/TimelineComponent.h"
+#include "SLRuntimeManager.h"
 #include "StackChecker.generated.h"
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FStackCheckDone, bool, wasSuccessful);
 
+class ACharacterController; // Use Forward Declaration. 
 UCLASS()
 class CLICKINTERACTION_API AStackChecker : public AStaticMeshActor
 {
@@ -21,34 +24,28 @@ public:
 	// Sets default values for this actor's properties
 	AStackChecker();
 
-	UPROPERTY(EditAnywhere)
-		UCurveFloat* AnimationCurveRotation;
+	// The animation curve for rotation
+	UPROPERTY(EditAnywhere, Category = "CI - Animation Curves")
+		UCurveVector* RotationAnimationCurveVector;
 
-	UPROPERTY(EditAnywhere)
-		UCurveFloat* AnimationCurveTilting;
+	// The animation curve for shaking
+	UPROPERTY(EditAnywhere, Category = "CI - Animation Curves")
+		UCurveVector* ShakingAnimationCurveVector;
 
-	UPROPERTY(EditAnywhere)
-		UCurveFloat* AnimationCurveReverseTilting;
-	// How much rotate
-	UPROPERTY(EditAnywhere)
-		float Rotation;
-
-	// The maximium pitch
-	UPROPERTY(EditAnywhere)
-		float MaxTilt;
-
-	// The maximium deviation of the item's relative distance squared
-	UPROPERTY(EditAnywhere)
+	// The maximium deviation of the item's relative distance to base item
+	UPROPERTY(EditAnywhere, Category = "CI - General")
 		float MaxDeviation;
+
+	// Whether or not to show the stability check window
+	UPROPERTY(EditAnywhere, Category = "CI - General")
+		bool bShowStabilityCheckWindow;
+
+	// The time in seconds to wait between shaking/rotating and stability check
+	UPROPERTY(EditAnywhere, Category = "CI - General")
+		float DelayBeforeStabilityCheck;
 
 	UPROPERTY()
 		FStackCheckDone OnStackCheckDone;
-
-	UPROPERTY(EditAnywhere)
-		bool bShowStabilityCheckWindow;
-
-
-
 
 	void StartCheck(AActor* BaseItemToCheck);
 
@@ -61,14 +58,13 @@ protected:
 
 private:
 	FTimeline TimelineRotation;
-	FTimeline TimelineTilting;
-	FTimeline TimelineReverseTilting;
+	FTimeline TimelineShaking;
 
+	ACharacterController* PlayerCharacter;
+
+	// Initial position and rotation
+	FVector StartPosition;
 	FRotator StartRotation;
-	FRotator EndRotation;
-
-	FRotator StartTilt;
-	FRotator EndTilt;
 
 	AStaticMeshActor* StackCopy;
 
@@ -77,31 +73,34 @@ private:
 	float SumOfTimelineSeconds;
 	float SecondsLeft;
 
+	ASLRuntimeManager* SemLogRuntimeManager;
+	TSharedPtr<FOwlNode> StackCheckLogEvent;
+
 	ACIHUD* ClickInteractionHUD;
 
 	UFUNCTION()
-		void Rotate(float Value);
-
-	UFUNCTION()
-		void Tilt(float Value);
-
-	UFUNCTION()
-		void TiltDone();
+		void RotateVector(FVector Vector);
 
 	UFUNCTION()
 		void RotateDone();
 
 	UFUNCTION()
-		void TiltReverse(float Value);
+		void Shake(FVector Vector);
 
 	UFUNCTION()
-		void TiltReverseDone();
+		void ShakeDone();
 
 	void CheckStackRelativePositions();
 
-	bool bDone;
+	bool bStackCheckIsRunning;
 
 	AStaticMeshActor* CopyStack(AActor* ActorToCopy);
 	AStaticMeshActor* CopyActor(AActor* ActorToCopy);
 	void SetScreenCaptureEnabled(bool bEnabled);
+
+	void GenerateLogEvent(AActor * BaseItemToCheck);
+	void FinishLogEvent(bool bStackCheckSuccessful);
+	void EvaluateStabilityCheck();
+
+	FTimerHandle TimerHandlePauseBeforeCheck;
 };

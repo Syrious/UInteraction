@@ -20,12 +20,12 @@ void ACIHUD::DrawHUD()
 	}
 
 	if (StabilityTestSceneCaptureTexture != nullptr && bStabilityCheckScreenEnabled) {
-		//DrawTextureSimple(StabilityTestSceneCaptureTexture, 20, 20);
-		float TopLeftPosition = Canvas->ClipX - StabilityTestSceneCaptureTexture->GetSurfaceWidth();
-		FVector2D DrawPosition(TopLeftPosition, 0);
-		/*FVector2D Center(Canvas->ClipX * 0.5f, Canvas->ClipY * 0.5f);
-		FVector2D CrossHairDrawPosition(Center.X - (CrosshairTexture->GetSurfaceWidth() * 0.5f), Center.Y - (CrosshairTexture->GetSurfaceHeight() * 0.5f));*/
+		// float TopLeftPosition = Canvas->ClipX - StabilityTestSceneCaptureTexture->GetSurfaceWidth();
+		// FVector2D DrawPosition(TopLeftPosition, 0);
 
+		FVector2D Center(Canvas->ClipX * 0.5f, Canvas->ClipY * 0.5f);
+		FVector2D DrawPosition(Center.X - (StabilityTestSceneCaptureTexture->GetSurfaceWidth() * 0.5f), Center.Y - (StabilityTestSceneCaptureTexture->GetSurfaceHeight() * 0.5f));
+		
 		// Draw the crosshair at the centerpoint.
 		FCanvasTileItem TileItem(DrawPosition, StabilityTestSceneCaptureTexture->Resource, FLinearColor::White);
 	//	TileItem.BlendMode = SE_BLEND_Translucent;

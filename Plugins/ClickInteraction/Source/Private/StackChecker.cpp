@@ -1,10 +1,14 @@
 // Copyright 2017, Institute for Artificial Intelligence - University of Bremen
 #define printTimelineInfo(text) if (GEngine) GEngine->AddOnScreenDebugMessage(1, 5.0f,FColor::Emerald,text, false);
+#define SEMLOG_TAG "SemLog"
 
 #include "StackChecker.h"
 #include "Engine/World.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine.h" // Needed for GEngine
+#include "TagStatics.h"
+#include "SLUtils.h"
+#include "../Private/Character/CharacterController.h"
 #include "Components/StaticMeshComponent.h"
 
 
@@ -15,10 +19,8 @@ AStackChecker::AStackChecker()
 	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
 	PrimaryActorTick.bCanEverTick = true;
 
-	Rotation = 180.0f;
-	MaxTilt = 20.0f;
-	MaxDeviation = 50.0f;
-
+	MaxDeviation = 20.0f;
+	DelayBeforeStabilityCheck = 1.0f;
 	bShowStabilityCheckWindow = true;
 }
 
@@ -27,69 +29,70 @@ void AStackChecker::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// Get the player character controller from the world
+	for (TActorIterator<ACharacterController>RMItr(GetWorld()); RMItr; ++RMItr)
+	{
+		PlayerCharacter = *RMItr;
+		break;
+	}
+
+
 	// Find HUD
 	ClickInteractionHUD = Cast<ACIHUD>(GetWorld()->GetFirstPlayerController()->GetHUD());
 
-	// *** First tilt
-	if (AnimationCurveTilting != nullptr) {
-		FOnTimelineFloat TiltFunction;
+	StartPosition = GetActorLocation();
+	StartRotation = GetActorRotation();
+
+	if (ShakingAnimationCurveVector != nullptr) {
+		FOnTimelineVector ShakeFunction;
 		FOnTimelineEvent OnDoneFunction;
 
-		TiltFunction.BindUFunction(this, FName("Tilt"));
-		TimelineTilting.AddInterpFloat(AnimationCurveTilting, TiltFunction);
-		TimelineTilting.SetLooping(false);
+		ShakeFunction.BindUFunction(this, FName("Shake"));
+		TimelineShaking.AddInterpVector(ShakingAnimationCurveVector, ShakeFunction);
+		TimelineShaking.SetLooping(false);
 
-		OnDoneFunction.BindUFunction(this, FName("TiltDone"));
-		TimelineTilting.SetTimelineFinishedFunc(OnDoneFunction);
-
-		StartTilt = EndTilt = GetActorRotation();
-		EndTilt.Pitch += MaxTilt;
-
-		SumOfTimelineSeconds += TimelineTilting.GetTimelineLength();
+		OnDoneFunction.BindUFunction(this, FName("ShakeDone"));
+		TimelineShaking.SetTimelineFinishedFunc(OnDoneFunction);
 	}
 
-	// ** Rotate
-	if (AnimationCurveRotation != nullptr) {
-		FOnTimelineFloat RotateFunction;
+	// ** Rotation via Vector
+	if (RotationAnimationCurveVector != nullptr) {
+		FOnTimelineVector RotateFunction;
 		FOnTimelineEvent OnDoneFunction;
 
-		RotateFunction.BindUFunction(this, FName("Rotate"));
-
-		TimelineRotation.AddInterpFloat(AnimationCurveRotation, RotateFunction);
+		RotateFunction.BindUFunction(this, FName("RotateVector"));
+		TimelineRotation.AddInterpVector(RotationAnimationCurveVector, RotateFunction);
 		TimelineRotation.SetLooping(false);
 
 		OnDoneFunction.BindUFunction(this, FName("RotateDone"));
 		TimelineRotation.SetTimelineFinishedFunc(OnDoneFunction);
-
-		SumOfTimelineSeconds += TimelineRotation.GetTimelineLength();
 	}
 
-	// ** Reverse tilt
-	if (AnimationCurveReverseTilting != nullptr) {
-		FOnTimelineFloat TiltFunction;
-		FOnTimelineEvent OnDoneFunction;
-
-		TiltFunction.BindUFunction(this, FName("TiltReverse"));
-		TimelineReverseTilting.AddInterpFloat(AnimationCurveReverseTilting, TiltFunction);
-		TimelineReverseTilting.SetLooping(false);
-
-		OnDoneFunction.BindUFunction(this, FName("TiltReverseDone"));
-		TimelineReverseTilting.SetTimelineFinishedFunc(OnDoneFunction);
-
-		SumOfTimelineSeconds += TimelineReverseTilting.GetTimelineLength();
+	// Set overall time of timelines
+	if (TimelineShaking.GetTimelineLength() > TimelineRotation.GetTimelineLength()) {
+		SumOfTimelineSeconds = TimelineShaking.GetTimelineLength();
+	}
+	else {
+		SumOfTimelineSeconds = TimelineRotation.GetTimelineLength();
 	}
 
+
+	// Get the semantic log runtime manager from the world
+	for (TActorIterator<ASLRuntimeManager>RMItr(GetWorld()); RMItr; ++RMItr)
+	{
+		SemLogRuntimeManager = *RMItr;
+		break;
+	}
 }
 
 // Called every frame
 void AStackChecker::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	TimelineTilting.TickTimeline(DeltaTime);
+	TimelineShaking.TickTimeline(DeltaTime);
 	TimelineRotation.TickTimeline(DeltaTime);
-	TimelineReverseTilting.TickTimeline(DeltaTime);
 
-	if (TimelineTilting.IsPlaying() || TimelineRotation.IsPlaying() || TimelineReverseTilting.IsPlaying()) {
+	if (bStackCheckIsRunning /*TimelineShaking.IsPlaying() || TimelineRotation.IsPlaying()*/) {
 		SecondsLeft -= DeltaTime;
 		printTimelineInfo(FString("Running stability test: ") + FString::SanitizeFloat(SecondsLeft));
 	}
@@ -97,47 +100,65 @@ void AStackChecker::Tick(float DeltaTime)
 
 void AStackChecker::StartCheck(AActor * BaseItemToCheck)
 {
+	bStackCheckIsRunning = true;
+	GenerateLogEvent(BaseItemToCheck);
+
 	SetScreenCaptureEnabled(true);
-	SecondsLeft = SumOfTimelineSeconds;
+	SecondsLeft = SumOfTimelineSeconds + DelayBeforeStabilityCheck;
+
+	UE_LOG(LogTemp, Warning, TEXT("Starting stack check for %f seconds"), SecondsLeft);
+
 	StackCopy = CopyStack(BaseItemToCheck);
-	TimelineTilting.PlayFromStart();
-}
-
-void AStackChecker::Rotate(float Value)
-{
-	FRotator NewRotation = FMath::Lerp(StartRotation, EndRotation, Value);
-	SetActorRotation(NewRotation);
-}
-
-void AStackChecker::Tilt(float Value)
-{
-	FRotator NewRotator = FMath::Lerp(StartTilt, EndTilt, Value);
-	SetActorRotation(NewRotator);
-}
-
-void AStackChecker::TiltDone()
-{
-	StartRotation = EndRotation = GetActorRotation();
-	EndRotation.Yaw += Rotation;
 
 	TimelineRotation.PlayFromStart();
+	TimelineShaking.PlayFromStart();
+}
+
+
+
+void AStackChecker::RotateVector(FVector Vector)
+{
+	AddActorWorldRotation(FRotator(Vector.X, Vector.Y, Vector.Z));
 }
 
 void AStackChecker::RotateDone()
 {
-	TimelineReverseTilting.PlayFromStart();
+	if (TimelineShaking.IsPlaying() == false /*|| SecondsLeft <= 0*/) {
+		if (DelayBeforeStabilityCheck > 0) {
+			GetWorld()->GetTimerManager().SetTimer(TimerHandlePauseBeforeCheck, this, &AStackChecker::EvaluateStabilityCheck, DelayBeforeStabilityCheck, false);
+		}
+		else {
+			EvaluateStabilityCheck();
+		}
+	}
+
 }
 
-void AStackChecker::TiltReverse(float Value)
+void AStackChecker::Shake(FVector Vector)
 {
-	FRotator NewRotator = FMath::Lerp(EndTilt, StartTilt, Value);
-	SetActorRotation(NewRotator);
+	AddActorWorldOffset(Vector);
 }
 
-void AStackChecker::TiltReverseDone()
+void AStackChecker::ShakeDone()
 {
+	if (TimelineRotation.IsPlaying() == false /*|| SecondsLeft <= 0*/) {
+		if (DelayBeforeStabilityCheck > 0) {
+			GetWorld()->GetTimerManager().SetTimer(TimerHandlePauseBeforeCheck, this, &AStackChecker::EvaluateStabilityCheck, DelayBeforeStabilityCheck, false);
+		}
+		else {
+			EvaluateStabilityCheck();
+		}
+	}
+
+}
+
+void AStackChecker::EvaluateStabilityCheck()
+{
+	UE_LOG(LogTemp, Warning, TEXT("Delayed strated"));
 	CheckStackRelativePositions();
+	SetActorLocationAndRotation(StartPosition, StartRotation);
 }
+
 
 void AStackChecker::CheckStackRelativePositions()
 {
@@ -147,18 +168,19 @@ void AStackChecker::CheckStackRelativePositions()
 
 		FVector RelativePosition = StackedItem.Key->GetActorLocation() - StackCopy->GetActorLocation();
 
-		UE_LOG(LogTemp, Warning, TEXT("%s old Relative position %s"), *StackedItem.Key->GetName(), *StackedItem.Value.ToCompactString());
-		UE_LOG(LogTemp, Warning, TEXT("%s new Relative position %s"), *StackedItem.Key->GetName(), *RelativePosition.ToCompactString());
+		//UE_LOG(LogTemp, Warning, TEXT("%s old Relative position %s"), *StackedItem.Key->GetName(), *StackedItem.Value.ToCompactString());
+		//UE_LOG(LogTemp, Warning, TEXT("%s new Relative position %s"), *StackedItem.Key->GetName(), *RelativePosition.ToCompactString());
 
-		float OldSquareSize = StackedItem.Value.SizeSquared();
-		float NewSquareSize = RelativePosition.SizeSquared();
+		float OldDistance = StackedItem.Value.Size();
+		float NewDistance = RelativePosition.Size();
 
-		UE_LOG(LogTemp, Warning, TEXT("%s old delta square distance %f"), *StackedItem.Key->GetName(), OldSquareSize);
-		UE_LOG(LogTemp, Warning, TEXT("%s new delta square distance %f"), *StackedItem.Key->GetName(), NewSquareSize);
-
-		if (FMath::Abs(NewSquareSize - OldSquareSize) > MaxDeviation) {
-			UE_LOG(LogTemp, Warning, TEXT("AStackChecker::CheckStackRelativePositions: Stack test failed. Stack unstable."));
+		//UE_LOG(LogTemp, Warning, TEXT("%s old delta square distance %f"), *StackedItem.Key->GetName(), OldDistance);
+		//UE_LOG(LogTemp, Warning, TEXT("%s new delta square distance %f"), *StackedItem.Key->GetName(), NewDistance);
+		float DeltaDistance = NewDistance - OldDistance;
+		if (DeltaDistance > MaxDeviation) {
+			UE_LOG(LogTemp, Warning, TEXT("AStackChecker::CheckStackRelativePositions: Stack test failed. Stack unstable. Item: %s Distance: %s"), *StackedItem.Key->GetName(), *FString::SanitizeFloat(DeltaDistance));
 			bIsSuccess = false;
+			break;
 		}
 	}
 
@@ -178,19 +200,22 @@ void AStackChecker::CheckStackRelativePositions()
 	else {
 		printTimelineInfo("Stability test done... failed");
 	}
+
 	SetScreenCaptureEnabled(false);
+
+	bStackCheckIsRunning = false;
+	FinishLogEvent(bIsSuccess);
+
 }
 
 AStaticMeshActor* AStackChecker::CopyStack(AActor * ActorToCopy)
 {
 	AStaticMeshActor* BaseCopy = CopyActor(ActorToCopy);
 
-	FAttachmentTransformRules TransformRules = FAttachmentTransformRules::SnapToTargetNotIncludingScale;
+	FAttachmentTransformRules TransformRules = FAttachmentTransformRules::KeepRelativeTransform;
 	TransformRules.bWeldSimulatedBodies = true;
-	BaseCopy->GetStaticMeshComponent()->SetSimulatePhysics(true);
 
-	BaseCopy->AttachToActor(this, TransformRules);
-	BaseCopy->SetActorRelativeLocation(FVector::ZeroVector);
+	BaseCopy->GetStaticMeshComponent()->SetSimulatePhysics(true);
 
 	TArray<AActor*> ChildActors;
 	ActorToCopy->GetAttachedActors(ChildActors);
@@ -201,16 +226,23 @@ AStaticMeshActor* AStackChecker::CopyStack(AActor * ActorToCopy)
 		AStaticMeshActor* ChildCopy = CopyActor(Child);
 
 		ChildCopy->GetStaticMeshComponent()->SetSimulatePhysics(true);
-		// ChildCopy->AttachToActor(BaseCopy, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+		ChildCopy->AttachToActor(BaseCopy, TransformRules);
 
 		FVector RelativeLocation = Child->GetActorLocation() - ActorToCopy->GetActorLocation();
 		FVector NewPosition = BaseCopy->GetActorLocation() + RelativeLocation;
-		ChildCopy->SetActorRelativeLocation(NewPosition);
+
+		ChildCopy->SetActorLocation(NewPosition);
+		ChildCopy->SetActorRotation(Child->GetActorRotation());
 
 		PositionsOnStart.Add(ChildCopy, RelativeLocation);
 	}
 
+	BaseCopy->AttachToActor(this, TransformRules);
+	BaseCopy->SetActorRelativeLocation(FVector::ZeroVector);
+	BaseCopy->SetActorRelativeRotation(FRotator::ZeroRotator);
+
 	BaseCopy->GetStaticMeshComponent()->UnWeldChildren();
+
 	return BaseCopy;
 }
 
@@ -222,6 +254,10 @@ AStaticMeshActor * AStackChecker::CopyActor(AActor * ActorToCopy)
 	AStaticMeshActor* CopyActorBase = GetWorld()->SpawnActor<AStaticMeshActor>(AStaticMeshActor::StaticClass());
 	CopyActorBase->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);
 	CopyActorBase->GetStaticMeshComponent()->SetStaticMesh(CastActor->GetStaticMeshComponent()->GetStaticMesh());
+
+	CopyActorBase->SetActorScale3D(ActorToCopy->GetActorScale3D());
+	CopyActorBase->SetActorLocation(ActorToCopy->GetActorLocation());
+	CopyActorBase->SetActorRotation(ActorToCopy->GetActorRotation());
 
 	TArray<UMaterialInterface*> Materials = CastActor->GetStaticMeshComponent()->GetMaterials();
 	for (size_t i = 0; i < Materials.Num(); i++)
@@ -238,3 +274,63 @@ void AStackChecker::SetScreenCaptureEnabled(bool bEnabled)
 		ClickInteractionHUD->bStabilityCheckScreenEnabled = bEnabled;
 	}
 }
+
+void AStackChecker::GenerateLogEvent(AActor * BaseItemToCheck)
+{
+	if (SemLogRuntimeManager == nullptr) return;
+
+	// Log Pickup event
+	const FString ItemClass = FTagStatics::GetKeyValue(BaseItemToCheck, SEMLOG_TAG, "Class");
+	const FString ItemID = FTagStatics::GetKeyValue(BaseItemToCheck, SEMLOG_TAG, "Id");
+
+	// Create contact event and other actor individual
+	const FOwlIndividualName OtherIndividual("log", ItemClass, ItemID);
+	const FOwlIndividualName ContactIndividual("log", "StackChecking", FSLUtils::GenerateRandomFString(4));
+
+	// Owl prefixed names
+	const FOwlPrefixName RdfType("rdf", "type");
+	const FOwlPrefixName RdfAbout("rdf", "about");
+	const FOwlPrefixName RdfResource("rdf", "resource");
+	const FOwlPrefixName RdfDatatype("rdf", "datatype");
+	const FOwlPrefixName TaskContext("knowrob", "taskContext");
+	const FOwlPrefixName InContact("knowrob_u", "inContact");
+	const FOwlPrefixName OwlNamedIndividual("owl", "NamedIndividual");
+
+	// Owl classes
+	const FOwlClass XsdString("xsd", "string");
+	const FOwlClass TouchingSituation("knowrob_u", "StackChecking");
+
+	TArray <FOwlTriple> Properties;
+	Properties.Add(FOwlTriple(RdfType, RdfResource, TouchingSituation));
+	Properties.Add(FOwlTriple(TaskContext, RdfDatatype, XsdString, "-- Stack Checking -- "));
+	Properties.Add(FOwlTriple(InContact, RdfResource, OtherIndividual));
+
+	TSharedPtr<FOwlNode> ContactEvent = MakeShareable(new FOwlNode(OwlNamedIndividual, RdfAbout, ContactIndividual, Properties));
+
+	// Start the event with the given properties
+	if (SemLogRuntimeManager->StartEvent(ContactEvent))
+	{
+		// Add event to the local map of started events
+		StackCheckLogEvent = ContactEvent;
+	}
+
+	if (PlayerCharacter != nullptr && PlayerCharacter->LogComponent != nullptr) PlayerCharacter->LogComponent->StartEvent(ContactEvent);
+
+}
+
+void AStackChecker::FinishLogEvent(bool bStackCheckSuccessful)
+{
+	if (StackCheckLogEvent.IsValid()) {
+		const FOwlPrefixName RdfDatatype("rdf", "datatype");
+		const FOwlPrefixName TaskContext("knowrob", "taskContext");
+		const FOwlClass XsdString("xsd", "string");
+
+		FString SucessText = bStackCheckSuccessful ? "Success" : "Failed";
+		StackCheckLogEvent.Get()->Properties.Add(FOwlTriple(TaskContext, RdfDatatype, XsdString, " -- Stack Checking -- " + SucessText));
+
+		if (PlayerCharacter->LogComponent != nullptr) PlayerCharacter->LogComponent->FinishEvent(StackCheckLogEvent);
+		SemLogRuntimeManager->FinishEvent(StackCheckLogEvent);
+		StackCheckLogEvent = nullptr;
+	}
+}
+
